@@ -158,22 +158,54 @@
     const form = el('form', 'jt-form'), input = field('Search videos or paste a YouTube URL', searchState.query); input[0].classList.add('jt-search');
     const kind = select('Search for', searchState.kind, [['videos', 'Videos'], ['channels', 'Channels'], ['playlists', 'Playlists']]);
     const results = el('div');
-    const submit = button('Search', async () => { searchState = { query: input[1].value, kind: kind[1].value, items: [], next: null }; await load(false); }, 'jt-primary');
+    input[1].required = true;
+    const submit = button('Search', async () => {
+      const query = input[1].value.trim();
+      if (!query) { input[1].focus(); return; }
+      await load({ query, kind: kind[1].value, items: [], next: null });
+    }, 'jt-primary');
     form.append(input[0], kind[0], submit); form.onsubmit = e => { e.preventDefault(); submit.click(); }; main.append(form, results);
-    async function load(next) {
+    let loading = false;
+    async function load(request, more = false) {
+      if (loading) return;
+      loading = true;
       const version = generation; message('Searching…');
-      const data = await api((searchState.kind === 'videos' ? 'Search?query=' : 'Discover?kind=' + searchState.kind + '&query=') + encodeURIComponent(searchState.query) + (next && searchState.next ? '&page=' + encodeURIComponent(searchState.next) : ''));
-      if (version !== generation) return;
-      searchState.items = next ? [...searchState.items, ...data.items] : data.items; searchState.next = data.nextPageToken; draw(); message(data.items.length ? '' : 'No results. Try a different search.');
+      try {
+        const route = request.kind === 'videos' ? 'Search?query=' : 'Discover?kind=' + request.kind + '&query=';
+        const data = await api(route + encodeURIComponent(request.query) + (more ? '&page=' + encodeURIComponent(request.next) : ''));
+        if (version !== generation) return;
+        const seen = new Set(request.items.map(item => item.id));
+        const added = data.items.filter(item => !seen.has(item.id) && seen.add(item.id));
+        const offset = request.items.length;
+        request.items.push(...added);
+        searchState = { ...request, next: data.nextPageToken === request.next ? null : data.nextPageToken };
+        if (more) draw(added, offset);
+        else draw();
+        message(searchState.items.length ? (more ? `${added.length} more results loaded.` : '') : 'No results. Try a different search.');
+      } catch (error) {
+        if (version === generation) throw error;
+      } finally {
+        loading = false;
+      }
     }
-    function draw() {
-      results.replaceChildren();
-      if (searchState.kind === 'videos') grid(searchState.items, results);
-      else for (const item of searchState.items) {
+    let moreButton;
+    function draw(items = searchState.items, offset = 0) {
+      if (offset === 0) results.replaceChildren();
+      else moreButton?.remove();
+      if (searchState.kind === 'videos') {
+        const videos = results.querySelector('.jt-grid') || el('div', 'jt-grid');
+        for (const video of items) videos.append(card(video, searchState.items));
+        if (!videos.parentNode) results.append(videos);
+      } else for (const item of items) {
         const row = el('div', 'jt-row'), detail = el('div'); detail.append(el('strong', '', item.title), el('div', 'jt-small', item.author)); row.append(detail);
         row.append(button(item.kind === 'channels' ? 'Open channel' : 'Browse playlist', async () => { if (item.kind === 'channels') await channel(item.id, item.title); else await providerPlaylist(item.id, item.title); }, 'jt-primary')); results.append(row);
       }
-      if (searchState.next) results.append(button('Load more', () => load(true)));
+      moreButton = searchState.next ? button('Load more', () => load(searchState, true)) : null;
+      if (moreButton) results.append(moreButton);
+      if (offset) {
+        const firstNew = searchState.kind === 'videos' ? results.querySelector('.jt-grid')?.children[offset] : results.children[offset];
+        (firstNew?.querySelector('button') || moreButton || submit).focus({ preventScroll: true });
+      }
     }
     draw(); if (!searchState.items.length) input[1].focus();
     if (!session.safeSearchAvailable) main.append(el('p', 'jt-small', 'Managed discovery uses YouTube’s public results. SafeSearch requires the optional official API key; it is not a parental-control guarantee.'));
@@ -339,11 +371,28 @@
   }
   async function navigate(next, push = true) {
     if (!root) return; clearTimeout(timer); generation++; tab = next; main.replaceChildren();
+    const version = generation;
     status = el('div', 'jt-status'); status.setAttribute('role', 'status'); main.append(status);
     root.classList.toggle('jt-list', session?.settings.view === 'list');
     for (const b of root.querySelectorAll('[data-tab]')) { if (b.dataset.tab === next) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); }
     if (push && !root.classList.contains('jt-embedded')) history.replaceState({ ...(history.state || {}), jellyTube: next }, '', location.href);
-    try { if (next !== 'admin') await refreshLibrary(); if (next === 'search') await renderSearch(); else if (next === 'library') await renderLibrary(); else if (next === 'downloads') await renderDownloads(); else if (next === 'settings') await renderSettings(); else if (next === 'admin') await renderAdmin(); else await renderHome(); } catch (e) { message(e.message, true); }
+    try {
+      if (next !== 'admin') {
+        message('Loading JellyTube…');
+        const currentLibrary = await api('Me/Library');
+        if (version !== generation) return;
+        library = currentLibrary;
+        message('');
+      }
+      if (next === 'search') await renderSearch();
+      else if (next === 'library') await renderLibrary();
+      else if (next === 'downloads') await renderDownloads();
+      else if (next === 'settings') await renderSettings();
+      else if (next === 'admin') await renderAdmin();
+      else await renderHome();
+    } catch (error) {
+      if (version === generation) message(error.message, true);
+    }
   }
   function close(back = true) { generation++; clearTimeout(timer); clearTimeout(playbackReturn?.timeout); playbackReturn = null; root?.remove(); root = main = status = null; document.body.classList.remove('jt-open'); if (back && history.state?.jellyTube) history.back(); lastFocus?.focus(); }
   async function open(next = 'home', host) {
