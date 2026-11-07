@@ -5,7 +5,7 @@
   "overview": "YouTube, inside Jellyfin",
   "owner": "ThuGie",
   "category": "General",
-  "version": "0.1.0.0",
+  "version": "0.1.0.1",
   "targetAbi": "10.11.3.0",
   "autoUpdate": true,
   "imagePath": "thumb.png",
@@ -14,6 +14,6 @@
     "YoutubeExplode.dll",
     "Jellyfin.Plugin.JellyTube.dll"
   ],
-  "timestamp": "2026-11-07T01:10:10Z",
-  "changelog": "- Standalone managed C# extraction and downloads; no external downloader, runtime, helper plugin or sidecar.\n- Native Jellyfin playback with seekable DASH audio/video transport and retained local copies.\n- Private per-user libraries, favorites, Watch Later, playlists, followed channels and settings.\n- Self-contained web navigation, administrator setup, download permissions, quotas and storage controls.\n- Preview: tested on Jellyfin 10.11.11; physical Synology and TV-client certification remains pending."
+  "timestamp": "2026-11-07T10:58:55Z",
+  "changelog": "- Register native playback items directly when Play is pressed. Streaming and retained downloads no longer wait for library indexing, including videos whose stream files already exist."
 }
