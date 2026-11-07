@@ -101,7 +101,7 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
     public async Task<ActionResult> Prepare(string id, CancellationToken ct)
     {
         var owner = Owner(); var asset = await native.Prepare(owner, await Video(owner, id, ct), ct);
-        return Ok(new { video = asset.Video, itemId = asset.ItemId, status = asset.ItemId is null ? "Indexing" : "Ready" });
+        return Ok(new { video = asset.Video, itemId = asset.ItemId, status = "Ready" });
     }
     [HttpGet("Discover")]
     public async Task<ActionResult> Discover([FromQuery] string query, [FromQuery] string kind, CancellationToken ct)

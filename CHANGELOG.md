@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.0.1
+
+- Register native playback items directly when Play is pressed. Streaming and retained downloads no longer wait for library indexing, including videos whose stream files already exist.
+
 ## 0.1.0.0
 
 - Standalone managed C# extraction and downloads; no external downloader, runtime, helper plugin or sidecar.

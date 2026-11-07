@@ -35,16 +35,9 @@
   async function play(video, sequence = [video]) {
     if (!session.nativeLibrary) throw new Error('An administrator needs to create your private YouTube library first.');
     const scope = account(), version = generation, autoplay = session.settings.autoplay;
-    message('Preparing native playback…');
-    const started = Date.now(); let result;
-    do {
-      result = await api(`Videos/${video.id}/Prepare`, 'POST');
-      if (version !== generation) return;
-      if (result.itemId) break;
-      if (Date.now() - started > 45000) throw new Error('Jellyfin is still indexing this video. Open your YouTube library or try Play again shortly.');
-      await new Promise(r => setTimeout(r, 1500));
-      if (!root) return;
-    } while (!result.itemId);
+    message('Opening Jellyfin player…');
+    const result = await api(`Videos/${video.id}/Prepare`, 'POST');
+    if (version !== generation) return;
     const itemId = result.itemId;
     const nativeItem = await ApiClient.getItem(ApiClient.getCurrentUserId(), itemId);
     if (version !== generation) return;
@@ -62,14 +55,10 @@
       await new Promise(r => setTimeout(r, 200));
     }
     for (const video of videos) {
-      const started = Date.now(); let item;
-      do {
-        if (account() !== scope) return;
-        const player = document.querySelector('video'); if (!player?.currentSrc || player.ended) return;
-        item = await api(`Videos/${video.id}/Prepare`, 'POST');
-        if (item.itemId) break;
-        await new Promise(r => setTimeout(r, 1500));
-      } while (Date.now() - started < 45000);
+      if (account() !== scope) return;
+      const player = document.querySelector('video');
+      if (!player?.currentSrc || player.ended) return;
+      const item = await api(`Videos/${video.id}/Prepare`, 'POST');
       if (item?.itemId) await nativePlay([item.itemId], 0, true, scope);
     }
   }

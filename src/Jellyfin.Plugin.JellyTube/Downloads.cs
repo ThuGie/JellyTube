@@ -90,7 +90,6 @@ public sealed class Downloads(Store store, Extractor extractor, JellyfinMuxer mu
                 store.Put(job.Owner, "download", job.Id, job with { Status = "Ready", Progress = 1, Stage = "Available locally", UpdatedAt = DateTimeOffset.UtcNow });
                 File.SetLastWriteTimeUtc(Path.Combine(asset.Directory, "video.strm"), DateTime.UtcNow);
             }
-            await native.Refresh(job.Owner, cancel.Token);
         }
         catch (OperationCanceledException)
         {

@@ -5,10 +5,11 @@ using System.Xml.Linq;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Configuration;
+using MediaBrowser.Model.IO;
 
 namespace Jellyfin.Plugin.JellyTube;
 
-public sealed class NativeLibrary(Store store, Access access, ILibraryManager library, IUserManager users)
+public sealed class NativeLibrary(Store store, Access access, ILibraryManager library, IUserManager users, IFileSystem fileSystem)
 {
     private readonly SemaphoreSlim _provision = new(1);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _locks = new();
@@ -91,16 +92,59 @@ public sealed class NativeLibrary(Store store, Access access, ILibraryManager li
                     new XElement("uniqueid", new XAttribute("type", "youtube"), asset.Id),
                     new XElement("thumb", asset.Video.Thumbnail)));
                 await File.WriteAllTextAsync(Path.Combine(asset.Directory, "video.nfo"), doc.ToString(), ct);
-                await Refresh(owner, ct);
             }
-            var item = library.FindByPath(strm, false);
-            if (item is not null && item.Id.ToString("N") != asset.ItemId)
+            var scanGate = _scans.GetOrAdd(owner, _ => new(1));
+            await scanGate.WaitAsync(ct);
+            Video item;
+            try
+            {
+                var root = GetOrRegisterFolder(binding.Root, library.RootFolder);
+                item = library.FindByPath(strm, false) as Video ?? RegisterVideo(strm, asset.Directory, root, asset.Video);
+            }
+            finally { scanGate.Release(); }
+            if (!item.IsVisible(access.User(owner)))
+                throw new UnauthorizedAccessException("Jellyfin did not grant access to this video in your private library.");
+            if (item.Id.ToString("N") != asset.ItemId)
             {
                 asset = asset with { ItemId = item.Id.ToString("N") }; store.Put(owner, "asset", video.Id, asset);
             }
             return asset;
         }
         finally { gate.Release(); }
+    }
+
+    private Folder GetOrRegisterFolder(string path, Folder parent)
+    {
+        if (library.FindByPath(path, true) is Folder existing) return existing;
+        var folder = new Folder
+        {
+            Id = library.GetNewItemId(path, typeof(Folder)),
+            Path = path,
+            Name = Path.GetFileName(path)
+        };
+        if (library.GetItemById(folder.Id) is Folder registered) return registered;
+        parent.AddChild(folder);
+        return folder;
+    }
+
+    private Video RegisterVideo(string path, string directory, Folder root, VideoInfo info)
+    {
+        // Some library types resolve a directory containing a single video as the video itself.
+        var video = library.ResolvePath(fileSystem.GetDirectoryInfo(directory), root) as Video;
+        var parent = root;
+        if (video is null || !string.Equals(video.Path, path, StringComparison.Ordinal))
+        {
+            parent = GetOrRegisterFolder(directory, root);
+            video = library.ResolvePath(fileSystem.GetFileInfo(path), parent) as Video
+                ?? throw new InvalidOperationException("Jellyfin could not register the YouTube video.");
+        }
+        if (library.GetItemById(video.Id) is Video registered) return registered;
+        video.Name = info.Title;
+        video.Overview = info.Description;
+        if (info.DurationSeconds is > 0) video.RunTimeTicks = TimeSpan.FromSeconds(info.DurationSeconds.Value).Ticks;
+        video.ProviderIds["youtube"] = info.Id;
+        parent.AddChild(video);
+        return video;
     }
     public MediaAsset Resolve(string owner, string id, string secret)
     {
