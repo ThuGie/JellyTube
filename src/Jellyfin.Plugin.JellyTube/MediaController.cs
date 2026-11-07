@@ -9,24 +9,24 @@ namespace Jellyfin.Plugin.JellyTube;
 
 /// <summary>Capability-bound media transport for Jellyfin/FFmpeg/native clients, including byte-range seeking.</summary>
 [ApiController, Route("JellyTube/Media/{owner}/{id}/{secret}"), AllowAnonymous, JellyTubeErrors]
-public sealed class MediaController(Store store, NativeLibrary native, Extractor extractor, IHttpClientFactory http, SegmentCache cache) : ControllerBase
+public sealed class MediaController(Store store, NativeLibrary native, Extractor extractor, IHttpClientFactory http, SegmentCache cache, Downloads downloads) : ControllerBase
 {
     [HttpGet("manifest.mpd"), HttpHead("manifest.mpd")]
     public async Task<ActionResult> Manifest(string owner, string id, string secret, CancellationToken ct)
     {
         var asset = native.Resolve(owner, id, secret);
         Response.Headers.CacheControl = "private, no-store";
-        if (asset.LocalFile is not null && System.IO.File.Exists(asset.LocalFile))
+        var height = store.Settings(owner).MaxHeight;
+        if (downloads.PlaybackFile(id, height, asset) is not null)
             return Redirect(Plugin.Instance.Configuration.PublicBaseUrl.TrimEnd('/') + "/JellyTube/Media/" + owner + "/" + id + "/" + secret + "/local.mp4");
-        var height = store.Settings(owner).MaxHeight; var source = await extractor.ResolveAdaptive(id, height, ct);
         var seconds = asset.Video.DurationSeconds;
         if (seconds is null or <= 0)
         {
             var details = await extractor.Details(id, ct); seconds = details.DurationSeconds;
-            store.Put(owner, "asset", id, asset with { Video = details });
         }
         if (seconds is null or <= 0) throw new ProviderException("Live or unknown-duration videos are not supported in this preview.");
         var prefix = Plugin.Instance.Configuration.PublicBaseUrl.TrimEnd('/') + "/JellyTube/Media/" + owner + "/" + id + "/" + secret + "/";
+        var source = await extractor.ResolveAdaptive(id, height, ct);
         var xml = ManifestXml(source, seconds.Value, prefix, height);
         return Content(xml, "application/dash+xml");
     }
@@ -60,9 +60,10 @@ public sealed class MediaController(Store store, NativeLibrary native, Extractor
     public ActionResult Local(string owner, string id, string secret)
     {
         var asset = native.Resolve(owner, id, secret);
-        if (asset.LocalFile is null || !System.IO.File.Exists(asset.LocalFile)) return NotFound();
+        var local = downloads.PlaybackFile(id, store.Settings(owner).MaxHeight, asset);
+        if (local is null) return NotFound();
         Response.Headers.CacheControl = "private, no-store";
-        return PhysicalFile(asset.LocalFile, "video/mp4", enableRangeProcessing: true);
+        return PhysicalFile(local, "video/mp4", enableRangeProcessing: true);
     }
     [HttpGet("{track:regex(^(video|audio)$)}.mp4"), HttpHead("{track:regex(^(video|audio)$)}.mp4")]
     public async Task Stream(string owner, string id, string secret, string track, [FromQuery] int? height, [FromQuery] string? identity, CancellationToken ct)
@@ -85,7 +86,10 @@ public sealed class MediaController(Store store, NativeLibrary native, Extractor
                 request.Headers.Range = range;
             }
             var single = request.Headers.Range?.Ranges.SingleOrDefault();
-            var cacheKey = $"{id}|{selectedHeight}|{track}|{fingerprint}|{single?.From}|{single?.To}";
+            var cacheKey = $"{id}|{track}|{fingerprint}|{single?.From}|{single?.To}";
+            using var fill = !HttpMethods.IsHead(Request.Method) && single?.From is { } start && single.To is { } end
+                && end >= start && end - start < 4 * 1024 * 1024
+                ? await cache.EnterFill(cacheKey, deadline.Token) : null;
             if (single?.From is { } from && single.To is { } to && to >= from && cache.Get(cacheKey) is { } cached)
             {
                 Response.StatusCode = 206; Response.ContentType = track == "video" ? "video/mp4" : "audio/mp4";
@@ -104,7 +108,8 @@ public sealed class MediaController(Store store, NativeLibrary native, Extractor
             Response.ContentLength = response.Content.Headers.ContentLength;
             if (HttpMethods.IsHead(Request.Method)) return;
             if (response.StatusCode == HttpStatusCode.PartialContent && single?.From is { } first && single.To is { } last
-                && last >= first && last - first < 4 * 1024 * 1024 && response.Content.Headers.ContentLength == last - first + 1)
+                && fill is not null && response.Content.Headers.ContentLength == last - first + 1
+                && response.Content.Headers.ContentRange is { } returnedRange && returnedRange.From == first && returnedRange.To == last && returnedRange.Length == selected.Size)
             {
                 var bytes = await response.Content.ReadAsByteArrayAsync(deadline.Token); cache.Put(cacheKey, bytes);
                 await Response.Body.WriteAsync(bytes, ct); return;

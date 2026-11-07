@@ -9,6 +9,43 @@ public sealed class Downloads(Store store, Extractor extractor, JellyfinMuxer mu
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _active = new();
     private readonly SemaphoreSlim _wake = new(0, 1);
     private readonly object _gate = new();
+    private string SharedPath(string id, int height) =>
+        Rules.Inside(native.MediaRoot, $".shared/{Rules.VideoId(id)}-{height}.mp4");
+
+    public string? PlaybackFile(string id, int height, MediaAsset? asset)
+    {
+        if (asset?.LocalFile is { } local && File.Exists(local)) return local;
+        var shared = SharedPath(id, height);
+        return File.Exists(shared) ? shared : null;
+    }
+
+    public void RemoveRetained(string owner, string id)
+    {
+        lock (_gate)
+        {
+            var asset = store.Get<MediaAsset>(owner, "asset", id) ?? throw new KeyNotFoundException();
+            var job = store.Get<DownloadJob>(owner, "download", id);
+            if (job?.Status is "Queued" or "Downloading") throw new InvalidOperationException("Cancel the active download first.");
+            if (asset.LocalFile is { } local)
+            {
+                var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+                var legacy = Rules.Inside(native.MediaRoot, $".retained/{owner}/{id}.mp4");
+                var shared = job is null ? null : SharedPath(id, job.MaxHeight);
+                var path = Path.GetFullPath(local);
+                if (!path.Equals(legacy, comparison) && !path.Equals(shared, comparison))
+                    throw new InvalidOperationException("The retained file location is invalid.");
+                var usedByAnotherAccount = path.Equals(shared, comparison) && access.Users().Select(user => Rules.Owner(user.Id))
+                    .Any(other => other != owner && store.Get<MediaAsset>(other, "asset", id)?.LocalFile == local);
+                if (!usedByAnotherAccount)
+                {
+                    try { File.Delete(path); }
+                    catch (IOException) { throw new InvalidOperationException("The retained file is in use. Stop playback and retry."); }
+                }
+            }
+            store.Put(owner, "asset", id, asset with { LocalFile = null, Retained = false });
+            store.Delete(owner, "download", id);
+        }
+    }
     public DownloadJob Enqueue(string owner, VideoInfo video)
     {
         access.Binding(owner);
@@ -53,15 +90,17 @@ public sealed class Downloads(Store store, Extractor extractor, JellyfinMuxer mu
         {
             access.Binding(job.Owner);
             if (!Plugin.Instance.Configuration.EnableDownloads || Plugin.Instance.Configuration.DownloadDeniedUsers.Contains(job.Owner, StringComparer.OrdinalIgnoreCase)) throw new ProviderException("Downloads have been disabled for this account.");
-            if (StorageBytes() >= Plugin.Instance.Configuration.StorageBudgetMb * 1024 * 1024) throw new ProviderException("The storage budget is full.");
+            var final = SharedPath(job.Id, job.MaxHeight);
+            var reuse = File.Exists(final);
+            if (!reuse && StorageBytes() >= Plugin.Instance.Configuration.StorageBudgetMb * 1024 * 1024) throw new ProviderException("The storage budget is full.");
             lock (_gate)
             {
                 if (store.Get<DownloadJob>(job.Owner, "download", job.Id)?.Status != "Queued") return;
                 store.Put(job.Owner, "download", job.Id, job with { Status = "Downloading", Error = null, UpdatedAt = DateTimeOffset.UtcNow });
             }
-            Directory.CreateDirectory(staging);
+            if (!reuse) Directory.CreateDirectory(staging);
             var lastProgress = DateTimeOffset.MinValue; string? lastStage = null;
-            var download = extractor.Download(job.Video, staging, job.MaxHeight, muxer, cancel.Token, (progress, stage) =>
+            var download = reuse ? Task.CompletedTask : extractor.Download(job.Video, staging, job.MaxHeight, muxer, cancel.Token, (progress, stage) =>
             {
                 var now = DateTimeOffset.UtcNow; if (stage == lastStage && (now - lastProgress).TotalMilliseconds < 500) return;
                 lastProgress = now; lastStage = stage;
@@ -79,16 +118,19 @@ public sealed class Downloads(Store store, Extractor extractor, JellyfinMuxer mu
             await download;
             access.Binding(job.Owner); cancel.Token.ThrowIfCancellationRequested();
             var asset = await native.Prepare(job.Owner, job.Video, cancel.Token);
-            var final = Rules.Inside(native.MediaRoot, ".retained/" + job.Owner + "/" + job.Id + ".mp4");
             lock (_gate)
             {
                 cancel.Token.ThrowIfCancellationRequested();
                 if (store.Get<DownloadJob>(job.Owner, "download", job.Id)?.Status != "Downloading") throw new OperationCanceledException();
-                Directory.CreateDirectory(Path.GetDirectoryName(final)!); File.Move(Path.Combine(staging, "video.mp4"), final, true);
+                if (reuse && !File.Exists(final)) throw new ProviderException("The shared copy was removed. Retry the download.");
+                if (!reuse)
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(final)!);
+                    File.Move(Path.Combine(staging, "video.mp4"), final, true);
+                }
                 store.Put(job.Owner, "asset", job.Id, asset with { LocalFile = final, Retained = true });
                 // Keep the stable STRM item for progress; the capability serves the retained file through the same native path.
                 store.Put(job.Owner, "download", job.Id, job with { Status = "Ready", Progress = 1, Stage = "Available locally", UpdatedAt = DateTimeOffset.UtcNow });
-                File.SetLastWriteTimeUtc(Path.Combine(asset.Directory, "video.strm"), DateTime.UtcNow);
             }
         }
         catch (OperationCanceledException)

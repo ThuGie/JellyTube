@@ -115,8 +115,22 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
     [HttpPost("Videos/{id}/Prepare")]
     public async Task<ActionResult> Prepare(string id, CancellationToken ct)
     {
-        var owner = Owner(); var asset = await native.Prepare(owner, await Video(owner, id, ct), ct);
-        return Ok(new { video = asset.Video, itemId = asset.ItemId, status = "Ready" });
+        var owner = Owner();
+        access.Binding(owner);
+        var video = await Video(owner, id, ct);
+        var height = store.Settings(owner).MaxHeight;
+        if (downloads.PlaybackFile(id, height, store.Get<MediaAsset>(owner, "asset", id)) is null)
+            _ = extractor.WarmAdaptive(id, height);
+        var asset = await native.Prepare(owner, video, ct);
+        return Ok(new { video = asset.Video, itemId = asset.ItemId, positionTicks = nativeUserData.PlaybackPosition(owner, asset.ItemId), status = "Ready" });
+    }
+    [HttpGet("Videos/{id}/Details")]
+    public async Task<ActionResult> Details(string id, CancellationToken ct)
+    {
+        var owner = Owner();
+        var details = await extractor.Details(Rules.VideoId(id), ct);
+        store.Put(owner, "video", id, details);
+        return Ok(details);
     }
     [HttpGet("Discover")]
     public async Task<ActionResult> Discover([FromQuery] string query, [FromQuery] string kind, CancellationToken ct)
@@ -226,19 +240,11 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
     [HttpDelete("Me/Downloads/{id}")]
     public ActionResult Cancel(string id) { downloads.Cancel(Owner(), Rules.VideoId(id)); return NoContent(); }
     [HttpDelete("Me/Retained/{id}")]
-    public async Task<ActionResult> RemoveRetained(string id, CancellationToken ct)
+    public ActionResult RemoveRetained(string id)
     {
         var owner = Owner(); Rules.VideoId(id); access.Binding(owner);
-        var asset = store.Get<MediaAsset>(owner, "asset", id) ?? throw new KeyNotFoundException();
-        if (asset.LocalFile is not null)
-        {
-            var expected = Rules.Inside(native.MediaRoot, ".retained/" + owner + "/" + id + ".mp4");
-            if (!Path.GetFullPath(asset.LocalFile).Equals(expected, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)) throw new InvalidOperationException("Retained file location does not match its owner.");
-            try { System.IO.File.Delete(expected); } catch (IOException) { throw new InvalidOperationException("The retained file is in use. Stop playback and retry."); }
-        }
-        store.Put(owner, "asset", id, asset with { LocalFile = null, Retained = false }); store.Delete(owner, "download", id);
-        var strm = Path.Combine(asset.Directory, "video.strm"); if (System.IO.File.Exists(strm)) System.IO.File.SetLastWriteTimeUtc(strm, DateTime.UtcNow);
-        await native.Refresh(owner, ct); return NoContent();
+        downloads.RemoveRetained(owner, id);
+        return NoContent();
     }
     [HttpGet("Me/Export")]
     public ActionResult Export()

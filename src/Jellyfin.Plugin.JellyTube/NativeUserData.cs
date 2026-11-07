@@ -6,6 +6,11 @@ namespace Jellyfin.Plugin.JellyTube;
 /// <summary>Jellyfin user data is the canonical favorite/resume state once a video has a native item.</summary>
 public sealed class NativeUserData(Store store, Access access, ILibraryManager library, IUserDataManager userData)
 {
+    public long PlaybackPosition(string owner, string? itemId) =>
+        Guid.TryParse(itemId, out var id) && library.GetItemById(id) is { } item
+            ? userData.GetUserData(access.User(owner), item)?.PlaybackPositionTicks ?? 0
+            : 0;
+
     public Task SetFavorite(string owner, string id, bool favorite, CancellationToken ct)
     {
         var asset = store.Get<MediaAsset>(owner, "asset", id); var item = asset is null ? null : library.FindByPath(Path.Combine(asset.Directory, "video.strm"), false);

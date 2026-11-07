@@ -44,17 +44,8 @@
       message('Preparing video…');
       const result = await api(`Videos/${video.id}/Prepare`, 'POST', undefined, request.signal);
       if (version !== generation || scope !== account()) return;
-      message('Loading playback position…');
-      const headers = {};
-      ApiClient.setRequestHeaders(headers);
-      const response = await fetch(ApiClient.getUrl(`Users/${ApiClient.getCurrentUserId()}/Items/${result.itemId}`), {
-        headers, signal: request.signal, credentials: 'same-origin'
-      });
-      if (!response.ok) throw new Error(`Jellyfin could not load the video item (${response.status}).`);
-      const nativeItem = await response.json();
-      if (version !== generation || scope !== account()) return;
       message('Opening Jellyfin player…');
-      await nativePlay([result.itemId], nativeItem.UserData?.PlaybackPositionTicks || 0, false, scope, version);
+      await nativePlay([result.itemId], result.positionTicks || 0, false, scope, version);
     } catch (error) {
       if (version !== generation || scope !== account()) return;
       if (request.signal.aborted) throw new Error('Jellyfin timed out while preparing the video. Try Play again.');
@@ -99,12 +90,16 @@
     if (queue) return;
     if (!event.defaultPrevented) throw new Error('Jellyfin’s player is unavailable. Refresh Jellyfin Web and try again.');
     playbackReturn = { page: root, scope: expectedScope, entered: false };
-    playbackReturn.timeout = setTimeout(() => {
-      if (!playbackReturn?.entered) {
+    const pending = playbackReturn;
+    pending.timeout = setTimeout(() => {
+      if (playbackReturn !== pending || pending.entered) return;
+      message('Still opening the player. The first stream may take longer to prepare…');
+      pending.timeout = setTimeout(() => {
+        if (playbackReturn !== pending || pending.entered) return;
         playbackReturn = null;
-        message('Jellyfin did not open the player within 20 seconds. Try Play again.', true);
-      }
-    }, 20000);
+        message('Jellyfin could not open the player. Try Play again.', true);
+      }, 45000);
+    }, 15000);
     updatePlaybackPage();
   }
   function updatePlaybackPage() {
@@ -136,9 +131,71 @@
     actions.append(button('▶ Play', () => play(video, sequence), 'jt-primary'), button(saved('favorites', video.id) ? '★ Favorited' : '☆ Favorite', b => toggleSave(video, 'favorites', b)), button(saved('watchLater', video.id) ? '✓ Watch later' : '+ Watch later', b => toggleSave(video, 'watchLater', b)), button('Playlist', () => addToPlaylist(video)));
     if (session.downloads) actions.append(button('↓ Download', async () => { await api(`Me/Downloads/${video.id}`, 'POST'); message('Download queued. You can follow progress in Downloads.'); }));
     if (video.channelId) actions.append(button('Channel', () => channel(video.channelId, video.channel)));
+    if (video.publishedAt) body.append(el('div', 'jt-byline', published(video.publishedAt)));
+    actions.append(button('Details', () => showDetails(video, sequence)));
     body.append(actions); c.append(img, body); return c;
   }
-  function grid(videos, host = main) { const g = el('div', 'jt-grid'); for (const v of videos) g.append(card(v, videos)); host.append(g); }
+  const published = value => new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(new Date(value));
+  function showDetails(video, sequence) {
+    const dialog = el('dialog', 'jt-details');
+    dialog.setAttribute('aria-label', video.title);
+    const metadata = el('div');
+    const note = el('div', 'jt-small', 'Loading video details…');
+    note.setAttribute('role', 'status');
+    dialog.append(el('h2', '', video.title), metadata, note,
+      button('▶ Play', () => { dialog.close(); return play(video, sequence); }, 'jt-primary'),
+      button('Close', () => dialog.close()));
+    const request = new AbortController();
+    dialog.addEventListener('close', () => { request.abort(); dialog.remove(); }, { once: true });
+    function render(details) {
+      metadata.replaceChildren(el('p', '', [
+        details.channel, details.publishedAt && published(details.publishedAt), duration(details.durationSeconds)
+      ].filter(Boolean).join(' · ')));
+      if (details.description) metadata.append(el('p', 'jt-description', details.description));
+      if (details.tags?.length) metadata.append(el('p', 'jt-small', details.tags.join(' · ')));
+    }
+    render(video);
+    root.append(dialog);
+    dialog.showModal();
+    api(`Videos/${video.id}/Details`, 'GET', undefined, request.signal).then(details => {
+      if (!dialog.open) return;
+      render(details);
+      note.textContent = '';
+    }).catch(error => {
+      if (dialog.open) note.textContent = error.message;
+    });
+  }
+  const videoSort = () => select('Sort videos', 'default', [
+    ['default', 'Original order'], ['newest', 'Newest first'], ['oldest', 'Oldest first'],
+    ['title', 'Title A–Z'], ['shortest', 'Shortest first'], ['longest', 'Longest first']
+  ]);
+  function sortedVideos(videos, order) {
+    const date = video => video.publishedAt ? Date.parse(video.publishedAt) : NaN;
+    const length = video => video.durationSeconds ?? NaN;
+    const compare = (field, direction) => (a, b) => {
+      const first = field(a), second = field(b);
+      if (!Number.isFinite(first)) return Number.isFinite(second) ? 1 : 0;
+      if (!Number.isFinite(second)) return -1;
+      return direction * (first - second);
+    };
+    const orders = {
+      newest: compare(date, -1), oldest: compare(date, 1), title: (a, b) => a.title.localeCompare(b.title),
+      shortest: compare(length, 1), longest: compare(length, -1)
+    };
+    return orders[order] ? [...videos].sort(orders[order]) : videos;
+  }
+  function grid(videos, host = main) {
+    const g = el('div', 'jt-grid');
+    const sort = videoSort();
+    function draw() {
+      const ordered = sortedVideos(videos, sort[1].value);
+      g.replaceChildren(...ordered.map(video => card(video, ordered)));
+    }
+    sort[1].onchange = draw;
+    if (videos.length > 1) host.append(sort[0]);
+    host.append(g);
+    draw();
+  }
   async function addToPlaylist(video) {
     await refreshLibrary();
     const box = el('div', 'jt-settings'); box.setAttribute('role', 'dialog'); box.setAttribute('aria-label', 'Add to playlist');
@@ -157,14 +214,15 @@
     heading('What do you want to watch?', 'Search YouTube or paste a video link. Play opens Jellyfin’s own player.');
     const form = el('form', 'jt-form'), input = field('Search videos or paste a YouTube URL', searchState.query); input[0].classList.add('jt-search');
     const kind = select('Search for', searchState.kind, [['videos', 'Videos'], ['channels', 'Channels'], ['playlists', 'Playlists']]);
-    const results = el('div');
+    const results = el('div'), sort = videoSort();
+    sort[1].onchange = () => draw();
     input[1].required = true;
     const submit = button('Search', async () => {
       const query = input[1].value.trim();
       if (!query) { input[1].focus(); return; }
       await load({ query, kind: kind[1].value, items: [], next: null });
     }, 'jt-primary');
-    form.append(input[0], kind[0], submit); form.onsubmit = e => { e.preventDefault(); submit.click(); }; main.append(form, results);
+    form.append(input[0], kind[0], submit); form.onsubmit = e => { e.preventDefault(); submit.click(); }; main.append(form, sort[0], results);
     let loading = false;
     async function load(request, more = false) {
       if (loading) return;
@@ -190,11 +248,16 @@
     }
     let moreButton;
     function draw(items = searchState.items, offset = 0) {
+      sort[0].hidden = searchState.kind !== 'videos' || searchState.items.length < 2;
+      if (searchState.kind === 'videos' && sort[1].value !== 'default') {
+        items = sortedVideos(searchState.items, sort[1].value);
+        offset = 0;
+      }
       if (offset === 0) results.replaceChildren();
       else moreButton?.remove();
       if (searchState.kind === 'videos') {
         const videos = results.querySelector('.jt-grid') || el('div', 'jt-grid');
-        for (const video of items) videos.append(card(video, searchState.items));
+        for (const video of items) videos.append(card(video, sort[1].value === 'default' ? searchState.items : items));
         if (!videos.parentNode) results.append(videos);
       } else for (const item of items) {
         const row = el('div', 'jt-row'), detail = el('div'); detail.append(el('strong', '', item.title), el('div', 'jt-small', item.author)); row.append(detail);
@@ -412,7 +475,7 @@
     if (root && !root.classList.contains('jt-embedded')) close(false);
   });
   window.addEventListener('hashchange', updatePlaybackPage);
-  document.addEventListener('keydown', e => { if (e.key === 'Escape' && root && !root.hidden && !root.classList.contains('jt-embedded')) close(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && root && !root.hidden && !root.querySelector('dialog[open]') && !root.classList.contains('jt-embedded')) close(); });
   function mount() {
     const scope = account();
     if (lastUser && scope !== lastUser) { close(false); library = null; searchState = { query: '', kind: 'videos', items: [], next: null }; document.getElementById('jt-launch')?.remove(); }

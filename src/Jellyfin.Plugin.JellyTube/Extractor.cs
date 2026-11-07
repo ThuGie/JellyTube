@@ -33,6 +33,14 @@ public sealed class Extractor
         finally { if (pending.IsValueCreated && pending.Value.IsCompleted) _adaptivePending.TryRemove(new KeyValuePair<string, Lazy<Task<AdaptiveSource>>>(key, pending)); }
     }
     public void InvalidateAdaptive(string id, int height) => _adaptiveCache.TryRemove(id + ":" + height, out _);
+    internal async Task WarmAdaptive(string id, int height)
+    {
+        try { await ResolveAdaptive(id, height, CancellationToken.None); }
+        catch (Exception ex) when (ex is ProviderException or OperationCanceledException)
+        {
+            // Preparation is best effort. The manifest request can retry and report playback errors.
+        }
+    }
     private async Task<AdaptiveSource> AdaptiveCore(string id, int height)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));

@@ -10,3 +10,16 @@ body.jt-open > .docspinner { display:none !important; }
     max-width: min(32rem, calc(100vw - 32px));
     margin: 0;
 }
+
+#jt-app [hidden] { display: none; }
+#jt-app .jt-details {
+    color: var(--jt-text);
+    background: var(--jt-panel);
+    border: 1px solid var(--jt-line);
+    border-radius: 14px;
+    width: min(42rem, calc(100vw - 32px));
+    padding: 24px;
+}
+#jt-app .jt-details::backdrop { background: #000a; }
+#jt-app .jt-details button { margin: 8px 8px 0 0; }
+#jt-app .jt-description { white-space: pre-wrap; overflow-wrap: anywhere; }
