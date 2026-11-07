@@ -1,0 +1,22 @@
+<div id="jellyTubeConfigurationPage" data-role="page" class="page type-interior pluginConfigurationPage">
+  <div data-role="content"><div class="content-primary"><p id="jt-config-status" role="status">Loading JellyTube…</p><div id="jt-admin-host"></div></div></div>
+  <script>
+  (function () {
+    var page = document.getElementById('jellyTubeConfigurationPage');
+    if (page._jellyTubeReady) return; page._jellyTubeReady = true;
+    var host = page.querySelector('#jt-admin-host'), status = page.querySelector('#jt-config-status'), loading;
+    function show() {
+      if (loading) return loading;
+      var assets = window.JellyTube ? Promise.resolve() : new Promise(function (resolve, reject) {
+        var link = document.createElement('link'); link.rel = 'stylesheet'; link.href = ApiClient.getUrl('JellyTube/assets/app.css'); document.head.appendChild(link);
+        var script = document.createElement('script'); script.src = ApiClient.getUrl('JellyTube/assets/app.js'); script.onload = resolve; script.onerror = reject; document.head.appendChild(script);
+      });
+      loading = assets.then(function () { return JellyTube.open('admin', host); }).then(function () { status.textContent = ''; })
+        .catch(function () { status.textContent = 'Could not open JellyTube. Refresh to retry.'; }).finally(function () { loading = null; });
+      return loading;
+    }
+    page.addEventListener('viewshow', show); page.addEventListener('pageshow', show);
+    page.addEventListener('viewhide', function () { if (window.JellyTube) JellyTube.close(false); }); show();
+  })();
+  </script>
+</div>

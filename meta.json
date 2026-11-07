@@ -1,0 +1,14 @@
+{
+  "guid": "241ac687-789b-4499-8ba1-9fb16602b421",
+  "name": "JellyTube",
+  "description": "YouTube discovery, private collections, managed downloads and native Jellyfin playback. Standalone preview; no external downloader.",
+  "overview": "YouTube, inside Jellyfin",
+  "owner": "ThuGie",
+  "category": "General",
+  "version": "0.1.0.0",
+  "targetAbi": "10.11.3.0",
+  "autoUpdate": true,
+  "imagePath": "thumb.png",
+  "imageUrl": "https://raw.githubusercontent.com/ThuGie/JellyTube/main/assets/jellytube.png",
+  "assemblies": ["YoutubeExplode.dll", "Jellyfin.Plugin.JellyTube.dll"]
+}

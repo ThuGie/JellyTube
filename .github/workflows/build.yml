@@ -1,0 +1,24 @@
+name: Build and validate
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - run: dotnet test tests/JellyTube.Tests -c Release --nologo
+      - run: python -m unittest discover -s tests -p "test_*.py"
+      - run: node --check src/Jellyfin.Plugin.JellyTube/Web/app.js
+      - run: python scripts/package.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: JellyTube-${{ matrix.os }}
+          path: artifacts/releases/*

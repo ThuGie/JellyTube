@@ -1,0 +1,116 @@
+using System.Net;
+using System.Xml;
+using System.Xml.Linq;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+
+namespace Jellyfin.Plugin.JellyTube;
+
+/// <summary>Capability-bound media transport for Jellyfin/FFmpeg/native clients, including byte-range seeking.</summary>
+[ApiController, Route("JellyTube/Media/{owner}/{id}/{secret}"), AllowAnonymous, JellyTubeErrors]
+public sealed class MediaController(Store store, NativeLibrary native, Extractor extractor, IHttpClientFactory http, SegmentCache cache) : ControllerBase
+{
+    [HttpGet("manifest.mpd"), HttpHead("manifest.mpd")]
+    public async Task<ActionResult> Manifest(string owner, string id, string secret, CancellationToken ct)
+    {
+        var asset = native.Resolve(owner, id, secret);
+        Response.Headers.CacheControl = "private, no-store";
+        if (asset.LocalFile is not null && System.IO.File.Exists(asset.LocalFile))
+            return Redirect(Plugin.Instance.Configuration.PublicBaseUrl.TrimEnd('/') + "/JellyTube/Media/" + owner + "/" + id + "/" + secret + "/local.mp4");
+        var height = store.Settings(owner).MaxHeight; var source = await extractor.ResolveAdaptive(id, height, ct);
+        var seconds = asset.Video.DurationSeconds;
+        if (seconds is null or <= 0)
+        {
+            var details = await extractor.Details(id, ct); seconds = details.DurationSeconds;
+            store.Put(owner, "asset", id, asset with { Video = details });
+        }
+        if (seconds is null or <= 0) throw new ProviderException("Live or unknown-duration videos are not supported in this preview.");
+        var prefix = Plugin.Instance.Configuration.PublicBaseUrl.TrimEnd('/') + "/JellyTube/Media/" + owner + "/" + id + "/" + secret + "/";
+        var xml = ManifestXml(source, seconds.Value, prefix, height);
+        return Content(xml, "application/dash+xml");
+    }
+    internal static string ManifestXml(AdaptiveSource source, double seconds, string prefix, int height = 720)
+    {
+        XNamespace ns = "urn:mpeg:dash:schema:mpd:2011";
+        string TrackUrl(AdaptiveTrack track, string kind) => prefix + kind + ".mp4?height=" + height + "&identity=" + Fingerprint(track);
+        XElement Segments(AdaptiveTrack track, string kind)
+        {
+            if (track.Segments is null || track.Segments.Count == 0)
+                return new(ns + "SegmentBase", new XAttribute("indexRange", $"{track.IndexStart}-{track.IndexEnd}"), new XElement(ns + "Initialization", new XAttribute("range", "0-" + track.InitEnd)));
+            var timeline = new XElement(ns + "SegmentTimeline");
+            var time = track.PresentationTime;
+            foreach (var segment in track.Segments) { timeline.Add(new XElement(ns + "S", new XAttribute("t", time), new XAttribute("d", segment.Duration))); time += segment.Duration; }
+            return new(ns + "SegmentList", new XAttribute("timescale", track.Timescale), new XAttribute("presentationTimeOffset", track.PresentationTime),
+                new XElement(ns + "Initialization", new XAttribute("sourceURL", TrackUrl(track, kind)), new XAttribute("range", "0-" + track.InitEnd)), timeline,
+                track.Segments.Select(s => new XElement(ns + "SegmentURL", new XAttribute("media", TrackUrl(track, kind)), new XAttribute("mediaRange", $"{s.Start}-{s.End}"))));
+        }
+        XElement Adaptation(AdaptiveTrack track, string kind) => new(ns + "AdaptationSet", new XAttribute("contentType", kind),
+            new XAttribute("mimeType", kind + "/mp4"), new XAttribute("segmentAlignment", "true"),
+            new XElement(ns + "Representation", new XAttribute("id", kind), new XAttribute("bandwidth", Math.Max(1, track.Bitrate)),
+                new XAttribute("codecs", track.Codec), kind == "video" ? new object[] { new XAttribute("width", track.Width), new XAttribute("height", track.Height) } : null,
+                new XElement(ns + "BaseURL", TrackUrl(track, kind)),
+                Segments(track, kind)));
+        return new XDocument(new XElement(ns + "MPD", new XAttribute("type", "static"), new XAttribute("profiles", "urn:mpeg:dash:profile:isoff-on-demand:2011"),
+            new XAttribute("minBufferTime", "PT3S"), new XAttribute("mediaPresentationDuration", XmlConvert.ToString(TimeSpan.FromSeconds(seconds))),
+            new XElement(ns + "Period", new XAttribute("start", "PT0S"), Adaptation(source.Video, "video"), Adaptation(source.Audio, "audio")))).ToString();
+    }
+    internal static string Fingerprint(AdaptiveTrack track) => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes($"{track.Codec}|{track.Size}|{track.Width}|{track.Height}|{track.IndexEnd}|{track.IndexIdentity}")))[..24].ToLowerInvariant();
+    [HttpGet("local.mp4"), HttpHead("local.mp4")]
+    public ActionResult Local(string owner, string id, string secret)
+    {
+        var asset = native.Resolve(owner, id, secret);
+        if (asset.LocalFile is null || !System.IO.File.Exists(asset.LocalFile)) return NotFound();
+        Response.Headers.CacheControl = "private, no-store";
+        return PhysicalFile(asset.LocalFile, "video/mp4", enableRangeProcessing: true);
+    }
+    [HttpGet("{track:regex(^(video|audio)$)}.mp4"), HttpHead("{track:regex(^(video|audio)$)}.mp4")]
+    public async Task Stream(string owner, string id, string secret, string track, [FromQuery] int? height, [FromQuery] string? identity, CancellationToken ct)
+    {
+        native.Resolve(owner, id, secret); var selectedHeight = height ?? store.Settings(owner).MaxHeight;
+        if (selectedHeight is not (360 or 480 or 720 or 1080 or 1440 or 2160)) throw new System.ComponentModel.DataAnnotations.ValidationException("Invalid media quality.");
+        using var transport = await cache.Enter(ct);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct); deadline.CancelAfter(TimeSpan.FromMinutes(30));
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            var source = await extractor.ResolveAdaptive(id, selectedHeight, deadline.Token); var selected = track == "video" ? source.Video : source.Audio;
+            if (!Extractor.AllowedMediaUri(selected.Url)) throw new ProviderException("Invalid upstream media host.");
+            var fingerprint = Fingerprint(selected);
+            if (identity is not null && identity != fingerprint) throw new ProviderException("The upstream media format changed. Restart playback to refresh it.");
+            using var request = new HttpRequestMessage(HttpMethod.Get, selected.Url);
+            if (Request.Headers.Range.Count > 0)
+            {
+                if (!System.Net.Http.Headers.RangeHeaderValue.TryParse(Request.Headers.Range.ToString(), out var range) || range.Unit != "bytes" || range.Ranges.Count != 1)
+                { Response.StatusCode = 416; return; }
+                request.Headers.Range = range;
+            }
+            var single = request.Headers.Range?.Ranges.SingleOrDefault();
+            var cacheKey = $"{id}|{selectedHeight}|{track}|{fingerprint}|{single?.From}|{single?.To}";
+            if (single?.From is { } from && single.To is { } to && to >= from && cache.Get(cacheKey) is { } cached)
+            {
+                Response.StatusCode = 206; Response.ContentType = track == "video" ? "video/mp4" : "audio/mp4";
+                Response.Headers.CacheControl = "private, no-store"; Response.Headers.AcceptRanges = "bytes";
+                Response.Headers.ContentRange = $"bytes {from}-{to}/{selected.Size}"; Response.ContentLength = cached.Length;
+                if (!HttpMethods.IsHead(Request.Method)) await Response.Body.WriteAsync(cached, ct); return;
+            }
+            using var response = await http.CreateClient("JellyTube.Media").SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
+            if (response.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.Gone && attempt == 0)
+            { extractor.InvalidateAdaptive(id, selectedHeight); continue; }
+            if (response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable) { Response.StatusCode = 416; return; }
+            if (response.StatusCode is not (HttpStatusCode.OK or HttpStatusCode.PartialContent)) throw new ProviderException("YouTube could not serve this media range. Retry playback.");
+            Response.StatusCode = (int)response.StatusCode; Response.ContentType = track == "video" ? "video/mp4" : "audio/mp4";
+            Response.Headers.CacheControl = "private, no-store"; Response.Headers.AcceptRanges = "bytes";
+            if (response.Content.Headers.ContentRange is { } contentRange) Response.Headers.ContentRange = contentRange.ToString();
+            Response.ContentLength = response.Content.Headers.ContentLength;
+            if (HttpMethods.IsHead(Request.Method)) return;
+            if (response.StatusCode == HttpStatusCode.PartialContent && single?.From is { } first && single.To is { } last
+                && last >= first && last - first < 4 * 1024 * 1024 && response.Content.Headers.ContentLength == last - first + 1)
+            {
+                var bytes = await response.Content.ReadAsByteArrayAsync(deadline.Token); cache.Put(cacheKey, bytes);
+                await Response.Body.WriteAsync(bytes, ct); return;
+            }
+            await using var input = await response.Content.ReadAsStreamAsync(deadline.Token);
+            await input.CopyToAsync(Response.Body, deadline.Token); return;
+        }
+    }
+}

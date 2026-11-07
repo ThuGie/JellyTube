@@ -1,0 +1,120 @@
+using System.Collections.Concurrent;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+
+namespace Jellyfin.Plugin.JellyTube;
+
+public sealed class Downloads(Store store, Extractor extractor, JellyfinMuxer muxer, NativeLibrary native, Access access, ILogger<Downloads> logger) : BackgroundService
+{
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> _active = new();
+    private readonly SemaphoreSlim _wake = new(0, 1);
+    private readonly object _gate = new();
+    public DownloadJob Enqueue(string owner, VideoInfo video)
+    {
+        access.Binding(owner);
+        if (!Plugin.Instance.Configuration.EnableDownloads || Plugin.Instance.Configuration.DownloadDeniedUsers.Contains(owner, StringComparer.OrdinalIgnoreCase)) throw new UnauthorizedAccessException("Downloads are disabled for this account.");
+        Rules.VideoId(video.Id);
+        lock (_gate)
+        {
+            var previous = store.Get<DownloadJob>(owner, "download", video.Id);
+            if (previous is { Status: "Queued" or "Downloading" or "Ready" }) return previous;
+            var job = new DownloadJob(video.Id, owner, video, store.Settings(owner).MaxHeight, UpdatedAt: DateTimeOffset.UtcNow);
+            store.Put(owner, "download", video.Id, job); if (_wake.CurrentCount == 0) _wake.Release(); return job;
+        }
+    }
+    public void Cancel(string owner, string id)
+    {
+        lock (_gate)
+        {
+            var job = store.Get<DownloadJob>(owner, "download", id) ?? throw new KeyNotFoundException();
+            if (job.Status is "Ready") throw new InvalidOperationException("A completed retained copy must be removed explicitly.");
+            store.Put(owner, "download", id, job with { Status = "Cancelled", UpdatedAt = DateTimeOffset.UtcNow });
+            if (_active.TryGetValue(owner + ":" + id, out var token)) token.Cancel();
+        }
+    }
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        foreach (var user in access.Users()) foreach (var job in store.List<DownloadJob>(Rules.Owner(user.Id), "download").Where(j => j.Status == "Downloading"))
+            store.Put(job.Owner, "download", job.Id, job with { Status = "Queued", Error = "Recovered after restart." });
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            var next = access.Users().SelectMany(u => store.List<DownloadJob>(Rules.Owner(u.Id), "download"))
+                .Where(j => j.Status == "Queued").OrderBy(j => j.UpdatedAt).FirstOrDefault();
+            if (next is null) { await _wake.WaitAsync(TimeSpan.FromSeconds(5), stoppingToken); continue; }
+            await Run(next, stoppingToken);
+        }
+    }
+    private async Task Run(DownloadJob job, CancellationToken stoppingToken)
+    {
+        using var cancel = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken); cancel.CancelAfter(TimeSpan.FromHours(2));
+        var key = job.Owner + ":" + job.Id; _active[key] = cancel;
+        var staging = Rules.Inside(native.MediaRoot, ".staging/" + job.Owner + "-" + job.Id);
+        try
+        {
+            access.Binding(job.Owner);
+            if (!Plugin.Instance.Configuration.EnableDownloads || Plugin.Instance.Configuration.DownloadDeniedUsers.Contains(job.Owner, StringComparer.OrdinalIgnoreCase)) throw new ProviderException("Downloads have been disabled for this account.");
+            if (StorageBytes() >= Plugin.Instance.Configuration.StorageBudgetMb * 1024 * 1024) throw new ProviderException("The storage budget is full.");
+            lock (_gate)
+            {
+                if (store.Get<DownloadJob>(job.Owner, "download", job.Id)?.Status != "Queued") return;
+                store.Put(job.Owner, "download", job.Id, job with { Status = "Downloading", Error = null, UpdatedAt = DateTimeOffset.UtcNow });
+            }
+            Directory.CreateDirectory(staging);
+            var lastProgress = DateTimeOffset.MinValue; string? lastStage = null;
+            var download = extractor.Download(job.Video, staging, job.MaxHeight, muxer, cancel.Token, (progress, stage) =>
+            {
+                var now = DateTimeOffset.UtcNow; if (stage == lastStage && (now - lastProgress).TotalMilliseconds < 500) return;
+                lastProgress = now; lastStage = stage;
+                lock (_gate)
+                {
+                    var current = store.Get<DownloadJob>(job.Owner, "download", job.Id);
+                    if (current?.Status == "Downloading") store.Put(job.Owner, "download", job.Id, current with { Progress = Math.Clamp(progress, 0, 1), Stage = stage, UpdatedAt = now });
+                }
+            });
+            while (!download.IsCompleted)
+            {
+                await Task.WhenAny(download, Task.Delay(1000, cancel.Token));
+                if (StorageBytes() > Plugin.Instance.Configuration.StorageBudgetMb * 1024 * 1024) { cancel.Cancel(); try { await download; } catch (OperationCanceledException) { } throw new ProviderException("Download stopped because the storage budget was reached."); }
+            }
+            await download;
+            access.Binding(job.Owner); cancel.Token.ThrowIfCancellationRequested();
+            var asset = await native.Prepare(job.Owner, job.Video, cancel.Token);
+            var final = Rules.Inside(native.MediaRoot, ".retained/" + job.Owner + "/" + job.Id + ".mp4");
+            lock (_gate)
+            {
+                cancel.Token.ThrowIfCancellationRequested();
+                if (store.Get<DownloadJob>(job.Owner, "download", job.Id)?.Status != "Downloading") throw new OperationCanceledException();
+                Directory.CreateDirectory(Path.GetDirectoryName(final)!); File.Move(Path.Combine(staging, "video.mp4"), final, true);
+                store.Put(job.Owner, "asset", job.Id, asset with { LocalFile = final, Retained = true });
+                // Keep the stable STRM item for progress; the capability serves the retained file through the same native path.
+                store.Put(job.Owner, "download", job.Id, job with { Status = "Ready", Progress = 1, Stage = "Available locally", UpdatedAt = DateTimeOffset.UtcNow });
+                File.SetLastWriteTimeUtc(Path.Combine(asset.Directory, "video.strm"), DateTime.UtcNow);
+            }
+            await native.Refresh(job.Owner, cancel.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            var current = store.Get<DownloadJob>(job.Owner, "download", job.Id);
+            if (current?.Status is not ("Cancelled" or "Ready")) store.Put(job.Owner, "download", job.Id, job with { Status = stoppingToken.IsCancellationRequested ? "Queued" : "Cancelled", UpdatedAt = DateTimeOffset.UtcNow });
+        }
+        catch (Exception ex)
+        {
+            var message = ex is ProviderException ? ex.Message : "Download could not be completed. Check library access, storage and server diagnostics.";
+            if (store.Get<DownloadJob>(job.Owner, "download", job.Id)?.Status == "Ready") logger.LogWarning("JellyTube retained media is ready; its library metadata refresh needs a retry.");
+            else
+            {
+                store.Put(job.Owner, "download", job.Id, job with { Status = "Failed", Error = message, UpdatedAt = DateTimeOffset.UtcNow });
+                logger.LogWarning("JellyTube download failed: {Reason}", message);
+            }
+        }
+        finally
+        {
+            _active.TryRemove(key, out _);
+            // Only the fixed, verified job staging directory is removed; retained/user files are never touched here.
+            try { if (Directory.Exists(staging)) Directory.Delete(staging, true); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { logger.LogWarning("JellyTube staging cleanup will be retried on the next download; a file is still in use."); }
+        }
+    }
+    public long StorageBytes() => Directory.Exists(native.MediaRoot)
+        ? Directory.EnumerateFiles(native.MediaRoot, "*", SearchOption.AllDirectories).Where(x => !x.EndsWith(".nfo") && !x.EndsWith(".strm")).Sum(x => { try { return new FileInfo(x).Length; } catch (FileNotFoundException) { return 0; } }) : 0;
+}

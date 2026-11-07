@@ -1,0 +1,36 @@
+[
+  {
+    "name": "YoutubeExplode",
+    "version": "6.6.3",
+    "license": "MIT",
+    "source": "https://github.com/Tyrrrz/YoutubeExplode/tree/6.6.3"
+  },
+  {
+    "name": "AngleSharp",
+    "version": "1.8.3",
+    "license": "MIT",
+    "source": "https://raw.githubusercontent.com/AngleSharp/AngleSharp/main/LICENSE",
+    "bundledBy": "YoutubeExplode"
+  },
+  {
+    "name": "Deorcify",
+    "version": "2.0.1",
+    "license": "MIT",
+    "source": "https://raw.githubusercontent.com/Tyrrrz/Deorcify/master/License.txt",
+    "bundledBy": "YoutubeExplode"
+  },
+  {
+    "name": "JsonExtensions",
+    "version": "1.2.3",
+    "license": "MIT",
+    "source": "https://raw.githubusercontent.com/Tyrrrz/JsonExtensions/master/License.txt",
+    "bundledBy": "YoutubeExplode"
+  },
+  {
+    "name": "PowerKit",
+    "version": "2.4.0",
+    "license": "MIT",
+    "source": "https://raw.githubusercontent.com/Tyrrrz/PowerKit/master/License.txt",
+    "bundledBy": "YoutubeExplode"
+  }
+]

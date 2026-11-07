@@ -1,0 +1,121 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Four-part plugin version (for example 0.1.0.1)
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jellytube-release
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: python scripts/catalog.py resolve
+
+  validate:
+    needs: resolve
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - run: dotnet test tests/JellyTube.Tests -c Release --nologo
+      - run: python -m unittest discover -s tests -p "test_*.py"
+      - run: node --check src/Jellyfin.Plugin.JellyTube/Web/app.js
+
+  release:
+    needs: [resolve, validate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.resolve.outputs.version }}
+      TAG: ${{ needs.resolve.outputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Build portable plugin
+        shell: bash
+        run: |
+          set -euo pipefail
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          python scripts/package.py --version "$VERSION" --repository "$GH_REPO"
+      - name: Publish immutable release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP="artifacts/releases/JellyTube_${VERSION}.zip"
+          python -c 'import os; from scripts.catalog import notes; print(notes(os.environ["VERSION"]))' > artifacts/release-notes.md
+          if gh release view "$TAG" --json isDraft --jq .isDraft > artifacts/existing-release.txt 2>/dev/null; then
+            if grep -qx true artifacts/existing-release.txt; then
+              gh release upload "$TAG" "$ZIP" "$ZIP.sha256" --clobber
+              gh release edit "$TAG" --draft=false --latest
+            fi
+          else
+            gh release create "$TAG" "$ZIP" "$ZIP.sha256" --draft --target "$GITHUB_SHA" --title "JellyTube $VERSION" --notes-file artifacts/release-notes.md
+            gh release edit "$TAG" --draft=false --latest
+          fi
+      - name: Verify uploaded archive and generate catalog entry
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/published
+          gh release download "$TAG" --pattern "JellyTube_${VERSION}.zip" --pattern "JellyTube_${VERSION}.zip.sha256" --dir artifacts/published --clobber
+          (cd artifacts/published && sha256sum -c "JellyTube_${VERSION}.zip.sha256")
+          PUBLISHED_AT="$(gh release view "$TAG" --json publishedAt --jq .publishedAt)"
+          python scripts/catalog.py entry --archive "artifacts/published/JellyTube_${VERSION}.zip" --repository "$GH_REPO" --version "$VERSION" --timestamp "$PUBLISHED_AT" --output "$RUNNER_TEMP/jellytube-entry.json"
+      - name: Update Jellyfin manifest on main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin main
+          git checkout -B catalog-update origin/main
+          python scripts/catalog.py merge --input "$RUNNER_TEMP/jellytube-entry.json"
+          git add manifest.json meta.json build.yaml src/Jellyfin.Plugin.JellyTube/Jellyfin.Plugin.JellyTube.csproj
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: publish Jellyfin catalog for v$VERSION"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: JellyTube-${{ needs.resolve.outputs.version }}
+          path: artifacts/published/*
