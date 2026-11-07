@@ -28,8 +28,8 @@ public sealed class Access(IUserManager users, ILibraryManager library)
         var user = User(owner);
         var binding = Plugin.Instance.Configuration.Libraries.FirstOrDefault(x => x.UserId == owner)
             ?? throw new InvalidOperationException("An administrator needs to create your private JellyTube library first.");
-        if (library.GetVirtualFolders().Where(f => !f.ItemId.Equals(binding.LibraryId, StringComparison.OrdinalIgnoreCase))
-            .SelectMany(f => f.Locations ?? []).Any(path => Rules.PathsOverlap(binding.Root, path)))
+        if (library.GetVirtualFolders().Where(f => !string.Equals(f.ItemId, binding.LibraryId, StringComparison.OrdinalIgnoreCase))
+            .SelectMany(f => f.Locations ?? []).Any(path => !string.IsNullOrWhiteSpace(path) && Rules.PathsOverlap(binding.Root, path)))
             throw new UnauthorizedAccessException("The private YouTube folder overlaps another library. Ask an administrator to choose separate library locations.");
         var folder = Guid.TryParse(binding.LibraryId, out var id) ? library.GetItemById(id) : null;
         if (folder is null || !folder.IsVisible(user)) throw new UnauthorizedAccessException("Your JellyTube library is unavailable.");

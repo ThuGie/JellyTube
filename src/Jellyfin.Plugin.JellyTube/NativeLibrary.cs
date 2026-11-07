@@ -9,7 +9,7 @@ using MediaBrowser.Model.IO;
 
 namespace Jellyfin.Plugin.JellyTube;
 
-public sealed class NativeLibrary(Store store, Access access, ILibraryManager library, IUserManager users, IFileSystem fileSystem)
+public sealed class NativeLibrary(Store store, Access access, ILibraryManager library, IUserManager users, IFileSystem fileSystem, ILibraryMonitor monitor)
 {
     private readonly SemaphoreSlim _provision = new(1);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _locks = new();
@@ -71,12 +71,16 @@ public sealed class NativeLibrary(Store store, Access access, ILibraryManager li
             || !string.IsNullOrEmpty(publicUrl.Query) || !string.IsNullOrEmpty(publicUrl.Fragment))
             throw new InvalidOperationException("Set the externally reachable Jellyfin base URL in JellyTube administrator settings.");
         var key = owner + ":" + video.Id; var gate = _locks.GetOrAdd(key, _ => new(1)); await gate.WaitAsync(ct);
+        string? changingDirectory = null;
         try
         {
             var asset = store.Get<MediaAsset>(owner, "asset", video.Id);
             if (asset is null)
             {
-                var dir = Rules.Inside(binding.Root, video.Id); Directory.CreateDirectory(dir);
+                var dir = Rules.Inside(binding.Root, video.Id);
+                monitor.ReportFileSystemChangeBeginning(dir);
+                changingDirectory = dir;
+                Directory.CreateDirectory(dir);
                 video = video with { Title = video.Title[..Math.Min(video.Title.Length, 500)], Description = video.Description?[..Math.Min(video.Description.Length, 20000)] };
                 asset = new(video.Id, owner, video, dir, Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant());
                 store.Put(owner, "asset", video.Id, asset);
@@ -85,6 +89,11 @@ public sealed class NativeLibrary(Store store, Access access, ILibraryManager li
             var strm = Path.Combine(asset.Directory, "video.strm");
             if (!File.Exists(strm) || await File.ReadAllTextAsync(strm, ct) != url)
             {
+                if (changingDirectory is null)
+                {
+                    monitor.ReportFileSystemChangeBeginning(asset.Directory);
+                    changingDirectory = asset.Directory;
+                }
                 await File.WriteAllTextAsync(strm + ".tmp", url, ct); File.Move(strm + ".tmp", strm, true);
                 var doc = new XDocument(new XElement("movie", new XElement("title", asset.Video.Title),
                     new XElement("plot", asset.Video.Description ?? ""), new XElement("studio", asset.Video.Channel),
@@ -110,7 +119,11 @@ public sealed class NativeLibrary(Store store, Access access, ILibraryManager li
             }
             return asset;
         }
-        finally { gate.Release(); }
+        finally
+        {
+            if (changingDirectory is not null) monitor.ReportFileSystemChangeComplete(changingDirectory, false);
+            gate.Release();
+        }
     }
 
     private Folder GetOrRegisterFolder(string path, Folder parent)

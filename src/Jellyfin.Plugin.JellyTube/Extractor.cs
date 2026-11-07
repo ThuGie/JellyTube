@@ -46,9 +46,10 @@ public sealed class Extractor
                 ?? throw new ProviderException("No supported adaptive video format is available.");
             var audio = manifest.GetAudioOnlyStreams().Where(s => s.Container.Name == "mp4").OrderByDescending(s => s.Bitrate).FirstOrDefault()
                 ?? throw new ProviderException("No supported adaptive audio format is available.");
-            var v = await IndexTrack(video, video.VideoCodec, video.VideoResolution.Width, video.VideoResolution.Height, timeout.Token);
-            var a = await IndexTrack(audio, audio.AudioCodec, 0, 0, timeout.Token);
-            return new(v, a, DateTimeOffset.UtcNow.AddMinutes(5));
+            var videoIndex = IndexTrack(video, video.VideoCodec, video.VideoResolution.Width, video.VideoResolution.Height, timeout.Token);
+            var audioIndex = IndexTrack(audio, audio.AudioCodec, 0, 0, timeout.Token);
+            await Task.WhenAll(videoIndex, audioIndex);
+            return new(await videoIndex, await audioIndex, DateTimeOffset.UtcNow.AddMinutes(5));
         }
         catch (Exception ex) when (ex is not (ProviderException or OperationCanceledException))
         { throw new ProviderException("Managed YouTube extraction failed. The video may be restricted or the extractor needs an update."); }
@@ -118,7 +119,7 @@ public sealed class Extractor
             var video = await _youtube.Videos.GetAsync(id, ct);
             return new(id, video.Title, video.Author.ChannelTitle, video.Author.ChannelId,
                 "https://i.ytimg.com/vi/" + id + "/hqdefault.jpg", video.Duration?.TotalSeconds, video.Description,
-                video.UploadDate);
+                video.UploadDate, video.Keywords.Take(30).ToArray());
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         { throw new ProviderException("Video details are unavailable. The video may be private or restricted."); }

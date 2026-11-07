@@ -3,6 +3,7 @@
   'use strict';
   if (window.JellyTube) return;
   let root, main, status, session, library, tab = 'home', generation = 0, timer, lastFocus, lastUser;
+  let playbackReturn;
   let searchState = { query: '', kind: 'videos', items: [], next: null }, libraryTab = 'favorites';
   const account = () => typeof ApiClient === 'undefined' || !ApiClient.accessToken() ? null : ApiClient.serverId() + ':' + (ApiClient.getCurrentUserId() || '').replace(/-/g, '').toLowerCase();
   const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
@@ -33,6 +34,7 @@
     b.textContent = kind === 'favorites' ? (exists ? '☆ Favorite' : '★ Favorited') : (exists ? '+ Watch later' : '✓ Watch later');
   }
   async function play(video, sequence = [video]) {
+    if (playbackReturn) return;
     if (!session.nativeLibrary) throw new Error('An administrator needs to create your private YouTube library first.');
     const scope = account(), version = generation, autoplay = session.settings.autoplay;
     message('Opening Jellyfin player…');
@@ -77,8 +79,36 @@
     if (account() !== expectedScope) { host.remove(); return; }
     const event = new MouseEvent('click', { bubbles: true, cancelable: true }); action.dispatchEvent(event); host.remove();
     if (queue) return;
-    if (event.defaultPrevented) close(false);
-    else { message('Opening the native video page…'); close(false); location.hash = '#/details?id=' + ids[0] + '&serverId=' + ApiClient.serverId(); }
+    if (!event.defaultPrevented) throw new Error('Jellyfin’s player is unavailable. Refresh Jellyfin Web and try again.');
+    playbackReturn = { page: root, scope: expectedScope, entered: false };
+    playbackReturn.timeout = setTimeout(() => {
+      if (!playbackReturn?.entered) {
+        playbackReturn = null;
+        message('Jellyfin is taking longer than expected to open the player. Check the server log if playback does not start.', true);
+      }
+    }, 60000);
+    updatePlaybackPage();
+  }
+  function updatePlaybackPage() {
+    const pending = playbackReturn;
+    if (!pending || pending.scope !== account() || pending.page !== root) return;
+    const playing = /^#\/video(?:[/?]|$)/.test(location.hash);
+    if (playing && !pending.entered) {
+      pending.entered = true;
+      clearTimeout(pending.timeout);
+      root.hidden = true;
+      document.body.classList.remove('jt-open');
+    } else if (!playing && pending.entered) {
+      // Jellyfin can update the route and then dispatch popstate in the same navigation.
+      clearTimeout(pending.timeout);
+      pending.timeout = setTimeout(() => {
+        if (playbackReturn !== pending || /^#\/video(?:[/?]|$)/.test(location.hash)) return;
+        playbackReturn = null;
+        root.hidden = false;
+        document.body.classList.add('jt-open');
+        message('');
+      }, 0);
+    }
   }
   function card(video, sequence = [video]) {
     const c = el('article', 'jt-card'), img = el('img', 'jt-image'); img.alt = ''; img.loading = 'lazy'; img.referrerPolicy = 'no-referrer';
@@ -174,14 +204,59 @@
     if (!session.nativeLibrary) message('Native playback needs a private library. An administrator can create one in Dashboard → Plugins → JellyTube.');
     const resume = library.history.filter(h => h.positionSeconds > 5 && (!h.video.durationSeconds || h.positionSeconds < h.video.durationSeconds - 10));
     if (resume.length) { main.append(el('h2', '', 'Continue watching')); grid(resume.slice(0, 8).map(h => h.video)); }
+    const uploads = new Map();
+    function channelUploads(id) {
+      if (!uploads.has(id)) uploads.set(id, api('Channels/' + encodeURIComponent(id) + '/Uploads'));
+      return uploads.get(id);
+    }
+    const version = generation;
+    const history = session.settings.recordHistory ? library.history : [];
+    const watchedChannels = [...new Set(history.map(entry => entry.video.channelId).filter(Boolean))].slice(0, 2);
+    const followedChannels = library.channels.slice(0, watchedChannels.length ? 2 : 4).map(entry => entry.channel.id);
+    const channels = [...new Set([...followedChannels, ...watchedChannels])];
+    main.append(el('h2', '', 'Recommended'));
+    const recommendations = el('div');
+    main.append(recommendations);
+    if (history.length) {
+      const topics = el('div');
+      main.append(topics);
+      api('Me/Recommendations/Topics').then(data => {
+        if (version !== generation || !data.items.length) return;
+        topics.append(el('h3', '', 'From topics you watch'));
+        grid(data.items, topics);
+      }).catch(() => {});
+    }
+    if (!channels.length) recommendations.append(el('div', 'jt-empty', 'Follow a channel or watch videos with history enabled to get recommendations.'));
+    else {
+      recommendations.append(el('div', 'jt-small', 'Finding videos from channels you follow and watch…'));
+      const seen = new Set(history.map(entry => entry.video.id));
+      Promise.allSettled(channels.map(channelUploads)).then(results => {
+        if (version !== generation) return;
+        const lists = results.filter(result => result.status === 'fulfilled').map(result => result.value.items);
+        const picks = [];
+        const maxLength = Math.max(0, ...lists.map(items => items.length));
+        for (let index = 0; index < maxLength && picks.length < 8; index++) {
+          for (const items of lists) {
+            const video = items[index];
+            if (video && !seen.has(video.id)) {
+              seen.add(video.id);
+              picks.push(video);
+              if (picks.length === 8) break;
+            }
+          }
+        }
+        recommendations.replaceChildren();
+        if (picks.length) grid(picks, recommendations);
+        else recommendations.append(el('div', 'jt-empty', lists.length ? 'No unwatched recommendations right now.' : 'Recommendations are temporarily unavailable.'));
+      });
+    }
     for (const [name, values] of [['Watch later', library.watchLater], ['Favorites', library.favorites]]) {
       if (!values.length) continue; main.append(el('h2', '', name)); grid(values.slice(0, 8).map(v => v.video));
     }
     if (!library.favorites.length && !library.watchLater.length) { main.append(el('h2', '', 'Start your own collection')); empty('Search for a creator, a topic, or a video. Favorite it or save it for later, and it will appear here.'); }
-    const version = generation;
     for (const item of library.channels.slice(0, 2)) {
       main.append(el('h2', '', item.channel.name + ' · Recent uploads')); const shelf = el('div'); shelf.append(el('div', 'jt-small', 'Loading uploads…')); main.append(shelf);
-      api('Channels/' + encodeURIComponent(item.channel.id) + '/Uploads').then(data => { if (version !== generation) return; shelf.replaceChildren(); grid(data.items.slice(0, 8), shelf); })
+      channelUploads(item.channel.id).then(data => { if (version !== generation) return; shelf.replaceChildren(); grid(data.items.slice(0, 8), shelf); })
         .catch(() => { if (version === generation) { shelf.replaceChildren(el('div', 'jt-small', 'Uploads are temporarily unavailable. Your saved library is still ready.')); } });
     }
   }
@@ -252,7 +327,7 @@
     if (push && !root.classList.contains('jt-embedded')) history.replaceState({ ...(history.state || {}), jellyTube: next }, '', location.href);
     try { if (next !== 'admin') await refreshLibrary(); if (next === 'search') await renderSearch(); else if (next === 'library') await renderLibrary(); else if (next === 'downloads') await renderDownloads(); else if (next === 'settings') await renderSettings(); else if (next === 'admin') await renderAdmin(); else await renderHome(); } catch (e) { message(e.message, true); }
   }
-  function close(back = true) { generation++; clearTimeout(timer); root?.remove(); root = main = status = null; document.body.classList.remove('jt-open'); if (back && history.state?.jellyTube) history.back(); lastFocus?.focus(); }
+  function close(back = true) { generation++; clearTimeout(timer); clearTimeout(playbackReturn?.timeout); playbackReturn = null; root?.remove(); root = main = status = null; document.body.classList.remove('jt-open'); if (back && history.state?.jellyTube) history.back(); lastFocus?.focus(); }
   async function open(next = 'home', host) {
     if (typeof ApiClient === 'undefined' || !ApiClient.accessToken()) return;
     if (root) close(false); lastFocus = document.activeElement;
@@ -265,12 +340,17 @@
     await navigate(next, false);
   }
   window.JellyTube = { open, close };
-  window.addEventListener('popstate', () => { if (root && !root.classList.contains('jt-embedded')) close(false); });
-  document.addEventListener('keydown', e => { if (e.key === 'Escape' && root && !root.classList.contains('jt-embedded')) close(); });
+  window.addEventListener('popstate', () => {
+    if (playbackReturn) { updatePlaybackPage(); return; }
+    if (root && !root.classList.contains('jt-embedded')) close(false);
+  });
+  window.addEventListener('hashchange', updatePlaybackPage);
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && root && !root.hidden && !root.classList.contains('jt-embedded')) close(); });
   function mount() {
     const scope = account();
     if (lastUser && scope !== lastUser) { close(false); library = null; searchState = { query: '', kind: 'videos', items: [], next: null }; document.getElementById('jt-launch')?.remove(); }
     lastUser = scope;
+    updatePlaybackPage();
     if (document.getElementById('jt-launch') || typeof ApiClient === 'undefined' || !ApiClient.accessToken()) return;
     const target = document.querySelector('.headerRight'); if (!target) return;
     const launch = button('▶ YouTube', () => open()); launch.id = 'jt-launch'; launch.setAttribute('aria-label', 'Open JellyTube'); target.prepend(launch);

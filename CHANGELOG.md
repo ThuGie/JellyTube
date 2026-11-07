@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.0.2
+
+- Keep the JellyTube page in place during native playback and restore it when the player closes.
+- Coordinate video registration with Jellyfin's file watcher and include server log references for unexpected playback errors.
+- Fetch audio and video indexes in parallel during streaming startup.
+- Recommend unwatched uploads from followed and recently watched channels on Home. When history is enabled, use tags from recent watches to discover videos across channels.
+
 ## 0.1.0.1
 
 - Register native playback items directly when Play is pressed. Streaming and retained downloads no longer wait for library indexing, including videos whose stream files already exist.

@@ -7,7 +7,66 @@ namespace Jellyfin.Plugin.JellyTube;
 public sealed class Catalog(Store store, Extractor extractor, IHttpClientFactory http)
 {
     private readonly SemaphoreSlim _gate = new(1);
+    private readonly SemaphoreSlim _topicGate = new(1);
     private readonly ConcurrentDictionary<string, (DateTimeOffset Expires, CatalogPage Page)> _cache = new();
+    private sealed record TopicResult(DateTimeOffset CreatedAt, DateTimeOffset? HistoryClearedAt, string Policy, CatalogPage Page);
+
+    public async Task<CatalogPage> RecommendTopics(string owner, CancellationToken ct)
+    {
+        if (!store.Settings(owner).RecordHistory) return new([]);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(TimeSpan.FromSeconds(15));
+        await _topicGate.WaitAsync(deadline.Token);
+        try
+        {
+            var settings = store.Settings(owner);
+            if (!settings.RecordHistory) return new([]);
+            var history = store.List<HistoryEntry>(owner, "history");
+            if (history.Count == 0) return new([]);
+
+            var cleared = store.Get<DateTimeOffset?>(owner, "historyClear", "current");
+            var config = Plugin.Instance.Configuration;
+            var policy = string.Join('|', settings.Region, settings.Language, settings.SafeSearch,
+                config.MinimumSafeSearch, !string.IsNullOrWhiteSpace(config.ApiKey));
+            var now = DateTimeOffset.UtcNow;
+            var cached = store.Get<TopicResult>(owner, "topicRecommendations", "current");
+            if (cached is null || cached.CreatedAt.AddHours(24) <= now || cached.HistoryClearedAt != cleared || cached.Policy != policy)
+            {
+                var recent = history.OrderByDescending(entry => entry.WatchedAt).Take(3);
+                var tagSets = await Task.WhenAll(recent.Select(async entry =>
+                {
+                    if (entry.Video.Tags is { } tags) return tags;
+                    try { return (await extractor.Details(entry.Video.Id, deadline.Token)).Tags ?? []; }
+                    catch (ProviderException) { return []; }
+                }));
+                var topic = tagSets.SelectMany(tags => tags.Select(tag => tag.Trim()).Distinct(StringComparer.OrdinalIgnoreCase))
+                    .Where(tag => tag.Length is >= 4 and <= 60
+                        && !tag.Equals("youtube", StringComparison.OrdinalIgnoreCase)
+                        && !tag.Equals("video", StringComparison.OrdinalIgnoreCase))
+                    .GroupBy(tag => tag, StringComparer.OrdinalIgnoreCase)
+                    .OrderByDescending(group => group.Count())
+                    .Select(group => group.Key)
+                    .FirstOrDefault();
+
+                CatalogPage page = new([]);
+                if (topic is not null)
+                {
+                    try { page = await Search(owner, topic, null, deadline.Token); }
+                    catch (ProviderException) { /* Channel recommendations remain available. */ }
+                }
+                if (!store.Settings(owner).RecordHistory || store.Get<DateTimeOffset?>(owner, "historyClear", "current") != cleared)
+                    return new([]);
+                cached = new(now, cleared, policy, page);
+                store.Put(owner, "topicRecommendations", "current", cached);
+            }
+            var watched = history.Select(entry => entry.Video.Id).ToHashSet(StringComparer.Ordinal);
+            var items = cached.Page.Items.Where(video => !watched.Contains(video.Id)).Take(8).ToList();
+            foreach (var video in items) store.Put(owner, "video", video.Id, video);
+            return new(items);
+        }
+        finally { _topicGate.Release(); }
+    }
+
     public async Task<CatalogPage> Search(string owner, string query, string? page, CancellationToken ct)
     {
         query = query.Trim(); if (query.Length is < 2 or > 150 || (page?.Length ?? 0) > 500) throw new ValidationException("Enter a search between 2 and 150 characters.");

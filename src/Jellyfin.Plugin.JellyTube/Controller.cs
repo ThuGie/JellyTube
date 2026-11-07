@@ -4,6 +4,8 @@ using MediaBrowser.Controller.Library;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.JellyTube;
 
@@ -23,7 +25,20 @@ public sealed class JellyTubeErrors : ExceptionFilterAttribute
             ValidationException or ArgumentException => 400, InvalidOperationException => 409,
             ProviderException => 502, OperationCanceledException => 408, _ => 500
         };
-        context.Result = new JsonResult(new { error = status == 500 ? "JellyTube could not complete this request." : ex.Message }, Store.Json) { StatusCode = status };
+        var error = ex.Message;
+        if (status == 500)
+        {
+            var reference = context.HttpContext.TraceIdentifier;
+            var logger = context.HttpContext.RequestServices.GetRequiredService<ILogger<JellyTubeErrors>>();
+            // Exception messages and request URLs can contain stream capabilities or API credentials.
+            for (Exception? cause = ex; cause is not null; cause = cause.InnerException)
+                logger.LogError("JellyTube request {Reference} failed in {Action} with {ExceptionType} ({ErrorCode:X8}). {StackTrace}",
+                    reference, context.ActionDescriptor.DisplayName, cause.GetType().FullName, cause.HResult, cause.StackTrace);
+            error = ex is IOException && context.RouteData.Values["action"] as string == nameof(JellyTubeController.Prepare)
+                ? $"JellyTube could not read or write the playback files. Check that the Jellyfin package account can write to the configured media folder. Log reference {reference}."
+                : $"JellyTube could not complete this request. Check the Jellyfin server log for reference {reference}.";
+        }
+        context.Result = new JsonResult(new { error }, Store.Json) { StatusCode = status };
         context.ExceptionHandled = true;
     }
 }
@@ -135,6 +150,9 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
         if (Plugin.Instance.Configuration.Libraries.Any(l => l.UserId == owner)) await native.Prepare(owner, video, ct);
         if (kind == "Favorites") await nativeUserData.SetFavorite(owner, id, true, ct); return NoContent();
     }
+    [HttpGet("Me/Recommendations/Topics")]
+    public async Task<ActionResult> TopicRecommendations(CancellationToken ct) =>
+        Ok(await catalog.RecommendTopics(Owner(), ct));
     [HttpDelete("Me/{kind:regex(^(Favorites|WatchLater)$)}/{id}")]
     public async Task<ActionResult> Unsave(string kind, string id, CancellationToken ct)
     {
@@ -160,7 +178,8 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
     public ActionResult Settings([FromBody] UserSettings settings)
     {
         var owner = Owner(); store.Put(owner, "settings", "current", Rules.Settings(settings));
-        if (!settings.RecordHistory) { store.Delete(owner, "history"); store.Put(owner, "historyClear", "current", DateTimeOffset.UtcNow); } return Ok(settings);
+        if (!settings.RecordHistory) ClearWatchHistory(owner);
+        return Ok(settings);
     }
     [HttpPost("Me/Playlists")]
     public ActionResult CreatePlaylist([FromBody] NameRequest request)
@@ -183,7 +202,18 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
         store.Put(owner, "history", Rules.VideoId(id), new HistoryEntry(await Video(owner, id, ct), progress.PositionSeconds, DateTimeOffset.UtcNow)); return NoContent();
     }
     [HttpDelete("Me/History")]
-    public ActionResult ClearHistory() { var owner = Owner(); store.Delete(owner, "history"); store.Put(owner, "historyClear", "current", DateTimeOffset.UtcNow); return NoContent(); }
+    public ActionResult ClearHistory()
+    {
+        ClearWatchHistory(Owner());
+        return NoContent();
+    }
+
+    private void ClearWatchHistory(string owner)
+    {
+        store.Put(owner, "historyClear", "current", DateTimeOffset.UtcNow);
+        store.Delete(owner, "history");
+        store.Delete(owner, "topicRecommendations");
+    }
     [HttpGet("Me/Downloads")]
     public ActionResult Jobs() => Ok(store.List<DownloadJob>(Owner(), "download").OrderByDescending(j => j.UpdatedAt));
     [HttpPost("Me/Downloads/{id}")]
@@ -219,7 +249,7 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
     public ActionResult ClearData()
     {
         var owner = Owner(); foreach (var kind in new[] { "favorite", "favoriteSync", "later", "playlist", "channel", "history", "video", "settings" }) store.Delete(owner, kind);
-        store.Put(owner, "historyClear", "current", DateTimeOffset.UtcNow);
+        ClearWatchHistory(owner);
         return NoContent(); // Retained media and native Jellyfin user data have their own explicit management.
     }
     [HttpGet("Admin/Settings"), Authorize(Policy = "RequiresElevation")]

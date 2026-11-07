@@ -28,7 +28,7 @@ public sealed class LibraryBinding
     public LibraryBinding(string userId, string libraryId, string root) { UserId = userId; LibraryId = libraryId; Root = root; }
 }
 public sealed record VideoInfo(string Id, string Title, string Channel, string ChannelId, string Thumbnail,
-    double? DurationSeconds = null, string? Description = null, DateTimeOffset? PublishedAt = null);
+    double? DurationSeconds = null, string? Description = null, DateTimeOffset? PublishedAt = null, string[]? Tags = null);
 public sealed record CatalogPage(List<VideoInfo> Items, string? NextPageToken = null);
 public sealed record UserSettings(bool Autoplay = false, int MaxHeight = 720, string Language = "en",
     string Region = "NL", string SafeSearch = "strict", bool RecordHistory = true, string View = "grid");
