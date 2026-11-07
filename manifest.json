@@ -1,1 +1,22 @@
-[]
+[
+  {
+    "guid": "241ac687-789b-4499-8ba1-9fb16602b421",
+    "name": "JellyTube",
+    "description": "YouTube discovery, private collections, managed downloads and native Jellyfin playback. Standalone preview; no external downloader.",
+    "overview": "YouTube, inside Jellyfin",
+    "owner": "ThuGie",
+    "category": "General",
+    "imageUrl": "https://raw.githubusercontent.com/ThuGie/JellyTube/main/assets/jellytube.png",
+    "versions": [
+      {
+        "version": "0.1.0.0",
+        "changelog": "- Standalone managed C# extraction and downloads; no external downloader, runtime, helper plugin or sidecar.\n- Native Jellyfin playback with seekable DASH audio/video transport and retained local copies.\n- Private per-user libraries, favorites, Watch Later, playlists, followed channels and settings.\n- Self-contained web navigation, administrator setup, download permissions, quotas and storage controls.\n- Preview: tested on Jellyfin 10.11.11; physical Synology and TV-client certification remains pending.",
+        "targetAbi": "10.11.3.0",
+        "sourceUrl": "https://github.com/ThuGie/JellyTube/releases/download/v0.1.0.0/JellyTube_0.1.0.0.zip",
+        "checksum": "724fbd1c48ea721d2337d4cf46f4cd2d",
+        "timestamp": "2026-11-07T01:10:10Z",
+        "dependencies": []
+      }
+    ]
+  }
+]
