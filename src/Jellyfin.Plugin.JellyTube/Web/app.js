@@ -69,7 +69,7 @@
     try {
       const result = await api(`Videos/${video.id}/Prepare`, 'POST', undefined, request.signal);
       if (request.signal.aborted || version !== generation || scope !== account()) return;
-      if (result.directSource) {
+      if (result.directPlayback) {
         openDirectPlayer(video, sequence, result, scope, version, started, dashReady);
         return;
       }
@@ -158,12 +158,9 @@
     directPlayer = dialog;
     dialog.showModal();
     window.addEventListener('pagehide', pageHide);
-    const sourceUrl = ApiClient.getUrl(result.directSource);
-    fetch(sourceUrl, { signal: AbortSignal.any([request.signal, AbortSignal.timeout(70000)]) }).then(async response => {
-      if (!response.ok) throw new Error('The video source is unavailable.');
-      const source = await response.json();
+    api(`Videos/${info.id}/Source`, 'GET', undefined, AbortSignal.any([request.signal, AbortSignal.timeout(70000)])).then(async source => {
       if (!dialog.open || request.signal.aborted || account() !== scope) return;
-      const url = new URL(source.file, sourceUrl).href;
+      const url = ApiClient.getUrl(source.path);
       statusLine.textContent = source.height ? `Buffering ${source.height}p…` : 'Buffering video…';
       if (source.mode === 'mp4') {
         video.addEventListener('loadedmetadata', () => {

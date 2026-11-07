@@ -15,6 +15,12 @@ public sealed class Access(IUserManager users, ILibraryManager library)
         return user;
     }
     public bool IsAdmin(string owner) => users.GetUserDto(User(owner)).Policy.IsAdministrator;
+    public bool CanPlayDirect(string owner)
+    {
+        var policy = users.GetUserDto(User(owner)).Policy;
+        if (!policy.EnableMediaPlayback) throw new UnauthorizedAccessException("Media playback is disabled for this Jellyfin account.");
+        return !policy.ForceRemoteSourceTranscoding;
+    }
     public bool Administrator(User user) => users.GetUserDto(user).Policy.IsAdministrator;
     public IEnumerable<User> Users()
     {

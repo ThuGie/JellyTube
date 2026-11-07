@@ -48,19 +48,6 @@ public sealed class MediaController(Store store, NativeLibrary native, Extractor
         var xml = ManifestXml(source.Adaptive!, seconds.Value, prefix, height, web);
         return Content(xml, "application/dash+xml");
     }
-    [HttpGet("source")]
-    public async Task<ActionResult> DirectSource(string owner, string id, string secret, CancellationToken ct)
-    {
-        var asset = native.Resolve(owner, id, secret);
-        var height = Height(owner);
-        Response.Headers.CacheControl = "private, no-store";
-        if (downloads.PlaybackFile(id, height, asset, minimumHeight: height) is not null)
-            return new JsonResult(new { mode = "mp4", file = "local.mp4?fullQuality=true" });
-        var source = await extractor.ResolvePlayback(id, height, ct);
-        if (source.Progressive is { } progressive)
-            return new JsonResult(new { mode = "mp4", file = "progressive.mp4?identity=" + progressive.Identity, height = progressive.Height });
-        return new JsonResult(new { mode = "dash", file = "manifest.mpd?web=true", height = source.Adaptive!.Video.Height });
-    }
     internal static string ManifestXml(AdaptiveSource source, double seconds, string prefix, int height = 720, bool web = false)
     {
         XNamespace ns = "urn:mpeg:dash:schema:mpd:2011";

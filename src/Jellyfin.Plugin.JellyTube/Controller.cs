@@ -120,6 +120,7 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
     {
         var owner = Owner();
         access.Binding(owner);
+        var directPlayback = access.CanPlayDirect(owner);
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         Rules.VideoId(id);
         var height = Plugin.Instance.Configuration.SharedLibrary is null ? store.Settings(owner).MaxHeight : MediaController.SharedStreamHeight;
@@ -131,14 +132,31 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
         HttpContext.RequestServices.GetRequiredService<ILogger<JellyTubeController>>()
             .LogInformation("JellyTube playback preparation {Reference} completed in {PrepareMs:F0} ms.", HttpContext.TraceIdentifier, prepareMs);
         return Ok(new { video = asset.Video, itemId = asset.ItemId, positionTicks = nativeUserData.PlaybackPosition(owner, asset.ItemId),
-            reference = HttpContext.TraceIdentifier, prepareMs, status = "Ready",
-            directSource = $"JellyTube/Media/{asset.Owner}/{asset.Id}/{asset.Secret}/source" });
+            reference = HttpContext.TraceIdentifier, prepareMs, status = "Ready", directPlayback });
+    }
+    [HttpGet("Videos/{id}/Source")]
+    public async Task<ActionResult> DirectSource(string id, CancellationToken ct)
+    {
+        var owner = Owner();
+        var binding = access.Binding(owner);
+        if (!access.CanPlayDirect(owner)) throw new UnauthorizedAccessException("This Jellyfin account requires the native player.");
+        Rules.VideoId(id);
+        var asset = store.Get<MediaAsset>(binding.UserId, "asset", id) ?? throw new KeyNotFoundException("Prepare the video first.");
+        var height = binding.UserId == NativeLibrary.SharedOwner ? MediaController.SharedStreamHeight : store.Settings(owner).MaxHeight;
+        var path = $"JellyTube/Media/{asset.Owner}/{asset.Id}/{asset.Secret}/";
+        if (downloads.PlaybackFile(id, height, asset, minimumHeight: height) is not null)
+            return Ok(new { mode = "mp4", path = path + "local.mp4?fullQuality=true" });
+        var source = await extractor.ResolvePlayback(id, height, ct);
+        if (source.Progressive is { } progressive)
+            return Ok(new { mode = "mp4", path = path + "progressive.mp4?identity=" + progressive.Identity, height = progressive.Height });
+        return Ok(new { mode = "dash", path = path + "manifest.mpd?web=true", height = source.Adaptive!.Video.Height });
     }
     [HttpPut("Videos/{id}/Progress")]
     public ActionResult SaveDirectProgress(string id, [FromBody] DirectProgressRequest request, CancellationToken ct)
     {
         var owner = Owner();
         access.Binding(owner);
+        if (!access.CanPlayDirect(owner)) throw new UnauthorizedAccessException("This Jellyfin account requires the native player.");
         if (!double.IsFinite(request.PositionSeconds) || request.PositionSeconds is < 0 or > 86400)
             throw new ValidationException("Invalid playback position.");
         nativeUserData.SaveProgress(owner, Rules.VideoId(id), request, ct);

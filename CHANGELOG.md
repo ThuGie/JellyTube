@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.0.14
+
+- Play supported streams directly in Jellyfin Web, with per-user resume and a native player fallback.
+- Respect Jellyfin playback permissions and administrator-required transcoding.
+- Default shared streaming to 1080p and prefer resolution before frame rate.
+- Add a General feed and wait for a mix of sources on For You.
+- Generate useful manifest changelogs and fill in previous releases.
+
 ## 0.1.0.13
 
 - Play supported streams directly in Jellyfin Web, with per-user resume and a native player fallback.
