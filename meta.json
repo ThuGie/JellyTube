@@ -5,7 +5,7 @@
   "overview": "YouTube, inside Jellyfin",
   "owner": "ThuGie",
   "category": "General",
-  "version": "0.1.0.6",
+  "version": "0.1.0.7",
   "targetAbi": "10.11.3.0",
   "autoUpdate": true,
   "imagePath": "thumb.png",
@@ -14,6 +14,6 @@
     "YoutubeExplode.dll",
     "Jellyfin.Plugin.JellyTube.dll"
   ],
-  "timestamp": "2026-11-07T17:13:54Z",
-  "changelog": "Release 0.1.0.6"
+  "timestamp": "2026-11-07T17:27:33Z",
+  "changelog": "Release 0.1.0.7"
 }

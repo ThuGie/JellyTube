@@ -9,6 +9,15 @@
     "imageUrl": "https://raw.githubusercontent.com/ThuGie/JellyTube/main/assets/jellytube.png",
     "versions": [
       {
+        "version": "0.1.0.7",
+        "changelog": "Release 0.1.0.7",
+        "targetAbi": "10.11.3.0",
+        "sourceUrl": "https://github.com/ThuGie/JellyTube/releases/download/v0.1.0.7/JellyTube_0.1.0.7.zip",
+        "checksum": "3f5c09f0e2b8ab68de79c4f19fd898cf",
+        "timestamp": "2026-11-07T17:27:33Z",
+        "dependencies": []
+      },
+      {
         "version": "0.1.0.6",
         "changelog": "Release 0.1.0.6",
         "targetAbi": "10.11.3.0",
