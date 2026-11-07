@@ -3,15 +3,15 @@
   'use strict';
   if (window.JellyTube) return;
   let root, main, status, session, library, tab = 'home', generation = 0, timer, lastFocus, lastUser;
-  let playbackReturn;
+  let playbackReturn, preparing;
   let searchState = { query: '', kind: 'videos', items: [], next: null }, libraryTab = 'favorites';
   const account = () => typeof ApiClient === 'undefined' || !ApiClient.accessToken() ? null : ApiClient.serverId() + ':' + (ApiClient.getCurrentUserId() || '').replace(/-/g, '').toLowerCase();
   const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
-  const api = async (path, method = 'GET', body) => {
+  const api = async (path, method = 'GET', body, signal) => {
     const owner = account();
     const headers = {}; ApiClient.setRequestHeaders(headers);
     if (body !== undefined) headers['Content-Type'] = 'application/json';
-    const response = await fetch(ApiClient.getUrl('JellyTube/' + path), { method, headers, credentials: 'same-origin', body: body === undefined ? undefined : JSON.stringify(body) });
+    const response = await fetch(ApiClient.getUrl('JellyTube/' + path), { method, headers, signal, credentials: 'same-origin', body: body === undefined ? undefined : JSON.stringify(body) });
     const data = response.status === 204 ? null : await response.json().catch(() => null);
     if (owner !== account()) throw new Error('The account changed. Reopen JellyTube to continue.');
     if (!response.ok) throw new Error(data?.error || data?.Message || `Request failed (${response.status})`);
@@ -34,17 +34,35 @@
     b.textContent = kind === 'favorites' ? (exists ? '☆ Favorite' : '★ Favorited') : (exists ? '+ Watch later' : '✓ Watch later');
   }
   async function play(video, sequence = [video]) {
-    if (playbackReturn) return;
+    if (playbackReturn || preparing) return;
     if (!session.nativeLibrary) throw new Error('An administrator needs to create your private YouTube library first.');
     const scope = account(), version = generation, autoplay = session.settings.autoplay;
-    message('Opening Jellyfin player…');
-    const result = await api(`Videos/${video.id}/Prepare`, 'POST');
-    if (version !== generation) return;
-    const itemId = result.itemId;
-    const nativeItem = await ApiClient.getItem(ApiClient.getCurrentUserId(), itemId);
-    if (version !== generation) return;
-    if (scope !== account()) return;
-    await nativePlay([itemId], nativeItem.UserData?.PlaybackPositionTicks || 0, false, scope);
+    const request = new AbortController();
+    preparing = true;
+    const timeout = setTimeout(() => request.abort(), 15000);
+    try {
+      message('Preparing video…');
+      const result = await api(`Videos/${video.id}/Prepare`, 'POST', undefined, request.signal);
+      if (version !== generation || scope !== account()) return;
+      message('Loading playback position…');
+      const headers = {};
+      ApiClient.setRequestHeaders(headers);
+      const response = await fetch(ApiClient.getUrl(`Users/${ApiClient.getCurrentUserId()}/Items/${result.itemId}`), {
+        headers, signal: request.signal, credentials: 'same-origin'
+      });
+      if (!response.ok) throw new Error(`Jellyfin could not load the video item (${response.status}).`);
+      const nativeItem = await response.json();
+      if (version !== generation || scope !== account()) return;
+      message('Opening Jellyfin player…');
+      await nativePlay([result.itemId], nativeItem.UserData?.PlaybackPositionTicks || 0, false, scope, version);
+    } catch (error) {
+      if (version !== generation || scope !== account()) return;
+      if (request.signal.aborted) throw new Error('Jellyfin timed out while preparing the video. Try Play again.');
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+      preparing = false;
+    }
     if (autoplay) {
       const index = sequence.findIndex(v => v.id === video.id), seen = new Set([video.id]);
       const following = sequence.slice(index + 1).filter(v => !seen.has(v.id) && seen.add(v.id)).slice(0, 20);
@@ -64,7 +82,7 @@
       if (item?.itemId) await nativePlay([item.itemId], 0, true, scope);
     }
   }
-  async function nativePlay(ids, positionTicks = 0, queue = false, expectedScope = account()) {
+  async function nativePlay(ids, positionTicks = 0, queue = false, expectedScope = account(), expectedGeneration = generation) {
     // Jellyfin's registered item-action element works in the bundled web client without importing private webpack modules.
     const host = el('div'); host.hidden = true;
     // Jellyfin's customized-built-in polyfill expects declarative is= markup, not createElement's native options object.
@@ -72,11 +90,11 @@
     const container = host.firstElementChild;
     container.fetchData = () => ApiClient.getItems(ApiClient.getCurrentUserId(), { Ids: ids.join(','), Limit: ids.length, Fields: 'MediaSources', EnableTotalRecordCount: false });
     const action = el('button', 'itemAction'); action.type = 'button'; action.dataset.id = ids[0]; action.dataset.serverid = ApiClient.serverId();
-    action.dataset.type = action.dataset.mediatype = 'Video'; action.dataset.action = queue ? 'queueallfromhere' : positionTicks > 0 ? 'resume' : 'playallfromhere'; action.dataset.positionticks = positionTicks;
+    action.dataset.type = action.dataset.mediatype = 'Video'; action.dataset.action = queue ? 'queueallfromhere' : positionTicks > 0 ? 'resume' : 'play'; action.dataset.positionticks = positionTicks;
     container.append(action); host.append(container); document.body.append(host);
     // Allow Jellyfin's element-upgrade observer to attach its native item-action listeners.
     await new Promise(resolve => setTimeout(resolve, 0));
-    if (account() !== expectedScope) { host.remove(); return; }
+    if (account() !== expectedScope || generation !== expectedGeneration) { host.remove(); return; }
     const event = new MouseEvent('click', { bubbles: true, cancelable: true }); action.dispatchEvent(event); host.remove();
     if (queue) return;
     if (!event.defaultPrevented) throw new Error('Jellyfin’s player is unavailable. Refresh Jellyfin Web and try again.');
@@ -84,9 +102,9 @@
     playbackReturn.timeout = setTimeout(() => {
       if (!playbackReturn?.entered) {
         playbackReturn = null;
-        message('Jellyfin is taking longer than expected to open the player. Check the server log if playback does not start.', true);
+        message('Jellyfin did not open the player within 20 seconds. Try Play again.', true);
       }
-    }, 60000);
+    }, 20000);
     updatePlaybackPage();
   }
   function updatePlaybackPage() {
