@@ -9,8 +9,17 @@
     "imageUrl": "https://raw.githubusercontent.com/ThuGie/JellyTube/main/assets/jellytube.png",
     "versions": [
       {
+        "version": "0.1.0.14",
+        "changelog": "- Play supported streams directly in Jellyfin Web, with per-user resume and a native player fallback.\n- Respect Jellyfin playback permissions and administrator-required transcoding.\n- Default shared streaming to 1080p and prefer resolution before frame rate.\n- Add a General feed and wait for a mix of sources on For You.\n- Generate useful manifest changelogs and fill in previous releases.",
+        "targetAbi": "10.11.3.0",
+        "sourceUrl": "https://github.com/ThuGie/JellyTube/releases/download/v0.1.0.14/JellyTube_0.1.0.14.zip",
+        "checksum": "574a482cfea768e69cec4dbbb3e6c960",
+        "timestamp": "2026-11-07T23:58:09Z",
+        "dependencies": []
+      },
+      {
         "version": "0.1.0.12",
-        "changelog": "Release 0.1.0.12",
+        "changelog": "- Keep the player visible on late startup, cache thumbnails and metadata, and keep feed cards stable.",
         "targetAbi": "10.11.3.0",
         "sourceUrl": "https://github.com/ThuGie/JellyTube/releases/download/v0.1.0.12/JellyTube_0.1.0.12.zip",
         "checksum": "c9db7d50ef3230cfeb968d21abca23b3",
@@ -19,7 +28,7 @@
       },
       {
         "version": "0.1.0.11",
-        "changelog": "Release 0.1.0.11",
+        "changelog": "- Prefer original audio, pass through compatible MP4 streams, and reduce startup buffering.",
         "targetAbi": "10.11.3.0",
         "sourceUrl": "https://github.com/ThuGie/JellyTube/releases/download/v0.1.0.11/JellyTube_0.1.0.11.zip",
         "checksum": "84f084e69c5906e46a3aa32668376946",
@@ -28,7 +37,7 @@
       },
       {
         "version": "0.1.0.10",
-        "changelog": "Release 0.1.0.10",
+        "changelog": "- Separate Explore topics, add newest-first sorting and scroll-to-load, and open Search immediately.",
         "targetAbi": "10.11.3.0",
         "sourceUrl": "https://github.com/ThuGie/JellyTube/releases/download/v0.1.0.10/JellyTube_0.1.0.10.zip",
         "checksum": "83210d1ffa6515456dbe4cc0438bc036",
@@ -37,7 +46,7 @@
       },
       {
         "version": "0.1.0.9",
-        "changelog": "Release 0.1.0.9",
+        "changelog": "- Expand recommendations and add Explore, Watch Later, and Favorites feeds.",
         "targetAbi": "10.11.3.0",
         "sourceUrl": "https://github.com/ThuGie/JellyTube/releases/download/v0.1.0.9/JellyTube_0.1.0.9.zip",
         "checksum": "e58a1372c890c20781327a092381b3d9",
@@ -46,7 +55,7 @@
       },
       {
         "version": "0.1.0.8",
-        "changelog": "Release 0.1.0.8",
+        "changelog": "- Consolidate native libraries, redesign Home, show video details, and split Shorts from full videos.",
         "targetAbi": "10.11.3.0",
         "sourceUrl": "https://github.com/ThuGie/JellyTube/releases/download/v0.1.0.8/JellyTube_0.1.0.8.zip",
         "checksum": "66dbd265915a5b91a8eed77e0b89ec4a",
@@ -55,7 +64,7 @@
       },
       {
         "version": "0.1.0.7",
-        "changelog": "Release 0.1.0.7",
+        "changelog": "- Track playback through first frame, improve shared storage, and add filters and browse pagination.",
         "targetAbi": "10.11.3.0",
         "sourceUrl": "https://github.com/ThuGie/JellyTube/releases/download/v0.1.0.7/JellyTube_0.1.0.7.zip",
         "checksum": "3f5c09f0e2b8ab68de79c4f19fd898cf",
@@ -64,7 +73,7 @@
       },
       {
         "version": "0.1.0.6",
-        "changelog": "Release 0.1.0.6",
+        "changelog": "- Warm playback earlier, share media across accounts, and expose video details.",
         "targetAbi": "10.11.3.0",
         "sourceUrl": "https://github.com/ThuGie/JellyTube/releases/download/v0.1.0.6/JellyTube_0.1.0.6.zip",
         "checksum": "a3509883adafe09bdda3c4cb5297ec26",
@@ -73,7 +82,7 @@
       },
       {
         "version": "0.1.0.5",
-        "changelog": "Release 0.1.0.5",
+        "changelog": "- Keep search results stable when loading more or switching tabs.",
         "targetAbi": "10.11.3.0",
         "sourceUrl": "https://github.com/ThuGie/JellyTube/releases/download/v0.1.0.5/JellyTube_0.1.0.5.zip",
         "checksum": "088d28171482f1d4601ba37b479a4980",
@@ -82,7 +91,7 @@
       },
       {
         "version": "0.1.0.4",
-        "changelog": "Release 0.1.0.4",
+        "changelog": "- Use Jellyfin's single-item playback action and keep playback status visible while scrolling.",
         "targetAbi": "10.11.3.0",
         "sourceUrl": "https://github.com/ThuGie/JellyTube/releases/download/v0.1.0.4/JellyTube_0.1.0.4.zip",
         "checksum": "13bc1649e2063f50d88114251223f79b",
@@ -91,7 +100,7 @@
       },
       {
         "version": "0.1.0.3",
-        "changelog": "Release 0.1.0.3",
+        "changelog": "- Support both Jellyfin library API signatures during native video registration.",
         "targetAbi": "10.11.3.0",
         "sourceUrl": "https://github.com/ThuGie/JellyTube/releases/download/v0.1.0.3/JellyTube_0.1.0.3.zip",
         "checksum": "8d6c509ffa6341017dfcc872183ef8ea",
