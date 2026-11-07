@@ -23,29 +23,37 @@ public sealed class Access(IUserManager users, ILibraryManager library)
         return ((System.Collections.IEnumerable?)(type.GetMethod("GetUsers", Type.EmptyTypes)?.Invoke(users, null)
             ?? type.GetProperty("Users")?.GetValue(users)))?.Cast<User>() ?? [];
     }
-    public LibraryBinding Binding(string owner)
+    public LibraryBinding Binding(string owner, bool legacy = false)
     {
         var user = User(owner);
-        var binding = Plugin.Instance.Configuration.Libraries.FirstOrDefault(x => x.UserId == owner)
-            ?? throw new InvalidOperationException("An administrator needs to create your private JellyTube library first.");
+        var config = Plugin.Instance.Configuration;
+        var binding = (legacy ? null : config.SharedLibrary) ?? config.Libraries.FirstOrDefault(x => x.UserId == owner)
+            ?? throw new InvalidOperationException("An administrator needs to set up the shared JellyTube library.");
         if (library.GetVirtualFolders().Where(f => !string.Equals(f.ItemId, binding.LibraryId, StringComparison.OrdinalIgnoreCase))
             .SelectMany(f => f.Locations ?? []).Any(path => !string.IsNullOrWhiteSpace(path) && Rules.PathsOverlap(binding.Root, path)))
-            throw new UnauthorizedAccessException("The private YouTube folder overlaps another library. Ask an administrator to choose separate library locations.");
+            throw new UnauthorizedAccessException("The JellyTube folder overlaps another library. Ask an administrator to choose separate library locations.");
         var folder = Guid.TryParse(binding.LibraryId, out var id) ? library.GetItemById(id) : null;
         if (folder is null || !folder.IsVisible(user)) throw new UnauthorizedAccessException("Your JellyTube library is unavailable.");
         // Fail closed if a later Jellyfin policy change accidentally exposes the library to another non-administrator.
-        if (Users().Any(other => other.Id != user.Id && !users.GetUserDto(other).Policy.IsAdministrator
+        if (binding != config.SharedLibrary && Users().Any(other => other.Id != user.Id && !users.GetUserDto(other).Policy.IsAdministrator
                 && !users.GetUserDto(other).Policy.IsDisabled && folder.IsVisible(other)))
             throw new UnauthorizedAccessException("This JellyTube library is visible to another account. Ask an administrator to correct library permissions.");
         return binding;
     }
+    public bool CanUse(string owner)
+    {
+        try { Binding(owner); return true; }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or InvalidOperationException) { return false; }
+    }
+    private static IEnumerable<LibraryBinding> ManagedLibraries() => Plugin.Instance.Configuration.Libraries
+        .Concat(Plugin.Instance.Configuration.SharedLibrary is { } shared ? [shared] : []);
     public void CheckMediaRoot(string root)
     {
-        var privateIds = Plugin.Instance.Configuration.Libraries.Select(b => b.LibraryId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var privateIds = ManagedLibraries().Select(b => b.LibraryId).ToHashSet(StringComparer.OrdinalIgnoreCase);
         if (library.GetVirtualFolders().Where(f => !privateIds.Contains(f.ItemId)).SelectMany(f => f.Locations ?? []).Any(path => Rules.PathsOverlap(root, path)))
             throw new System.ComponentModel.DataAnnotations.ValidationException("Choose a dedicated JellyTube directory outside all existing shared library paths.");
     }
-    public bool OverlapsPrivateLibrary(string path) => Plugin.Instance.Configuration.Libraries.Any(b => Rules.PathsOverlap(path, b.Root));
-    public bool UnchangedLibraryRoot(Guid libraryId, string path) => Plugin.Instance.Configuration.Libraries.Any(b => Guid.TryParse(b.LibraryId, out var id) && id == libraryId
+    public bool OverlapsPrivateLibrary(string path) => ManagedLibraries().Any(b => Rules.PathsOverlap(path, b.Root));
+    public bool UnchangedLibraryRoot(Guid libraryId, string path) => ManagedLibraries().Any(b => Guid.TryParse(b.LibraryId, out var id) && id == libraryId
         && Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Equals(Path.GetFullPath(b.Root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal));
 }

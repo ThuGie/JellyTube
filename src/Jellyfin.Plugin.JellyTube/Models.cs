@@ -17,6 +17,7 @@ public sealed class Configuration : BasePluginConfiguration
     public string[] DownloadDeniedUsers { get; set; } = [];
     public string MinimumSafeSearch { get; set; } = "moderate";
     public List<LibraryBinding> Libraries { get; set; } = [];
+    public LibraryBinding? SharedLibrary { get; set; }
 }
 
 public sealed class LibraryBinding

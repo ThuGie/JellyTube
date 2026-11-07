@@ -18,7 +18,10 @@ public sealed class Downloads(Store store, Extractor extractor, JellyfinMuxer mu
     {
         if (asset?.LocalFile is { } local && File.Exists(local)) return local;
         var shared = SharedPath(id, height);
-        return File.Exists(shared) ? shared : null;
+        if (File.Exists(shared)) return shared;
+        if (asset?.Owner != NativeLibrary.SharedOwner) return null;
+        return new[] { 2160, 1440, 1080, 720, 480, 360 }.Where(quality => quality <= height)
+            .Select(quality => SharedPath(id, quality)).FirstOrDefault(File.Exists);
     }
 
     public Stream? OpenPlayback(string id, int height, MediaAsset asset, Microsoft.AspNetCore.Http.HttpResponse response)
@@ -185,7 +188,7 @@ public sealed class Downloads(Store store, Extractor extractor, JellyfinMuxer mu
             }
             await download;
             access.Binding(job.Owner); cancel.Token.ThrowIfCancellationRequested();
-            var asset = await native.Prepare(job.Owner, job.Video, cancel.Token);
+            var prepared = await native.Prepare(job.Owner, job.Video, cancel.Token);
             lock (_gate)
             {
                 cancel.Token.ThrowIfCancellationRequested();
@@ -196,7 +199,8 @@ public sealed class Downloads(Store store, Extractor extractor, JellyfinMuxer mu
                     Directory.CreateDirectory(Path.GetDirectoryName(final)!);
                     File.Move(Path.Combine(staging, "video.mp4"), final, true);
                 }
-                store.Put(job.Owner, "asset", job.Id, asset with { LocalFile = final, Retained = true });
+                var asset = store.Get<MediaAsset>(job.Owner, "asset", job.Id) ?? prepared;
+                store.Put(job.Owner, "asset", job.Id, asset with { Owner = job.Owner, LocalFile = final, Retained = true });
                 _pendingDeletion.Remove(final);
                 // Keep the stable STRM item for progress; the capability serves the retained file through the same native path.
                 store.Put(job.Owner, "download", job.Id, job with { Status = "Ready", Progress = 1, Stage = "Available locally", UpdatedAt = DateTimeOffset.UtcNow });

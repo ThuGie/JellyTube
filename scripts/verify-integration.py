@@ -21,13 +21,13 @@ for name in ['tube-alice','tube-bob']:
     code,auth=call('/Users/AuthenticateByName','POST',{'Username':name,'Pw':s['password']});assert code==200,(code,auth)
     s[name]={'id':existing['Id'],'token':auth['AccessToken']};(live/'session.json').write_text(json.dumps(s,indent=2))
 alice=s['tube-alice'];bob=s['tube-bob']
+code,binding=call('/JellyTube/Admin/Library','POST');check('one shared library provisioned',code==200)
+if code!=200:print(binding);raise SystemExit(1)
 for name,who in [('Alice',alice),('Bob',bob)]:
-    code,binding=call('/JellyTube/Admin/Libraries/'+who['id'],'POST');check(name+' private library provisioned',code==200)
-    if code!=200:print(binding);raise SystemExit(1)
     who['libraryId']=binding['libraryId']
-for name,who,other in [('Alice',alice,bob),('Bob',bob,alice)]:
-    code,views=call('/Users/'+who['id']+'/Views',token=who['token']);ids=[v['Id'].replace('-','') for v in views.get('Items',[])]
-    check(name+' sees only own YouTube library',code==200 and who['libraryId'].replace('-','') in ids and other['libraryId'].replace('-','') not in ids)
+    code,views=call('/Users/'+who['id']+'/Views',token=who['token'])
+    ids=[v['Id'].replace('-','') for v in views.get('Items',[])]
+    check(name+' sees the same shared library',code==200 and binding['libraryId'].replace('-','') in ids)
 import urllib.parse
 for representation in ['body','query']:
     name='JellyTube-overlap-'+representation;path='/Library/VirtualFolders?name='+name+'&refreshLibrary=false'
@@ -36,17 +36,16 @@ for representation in ['body','query']:
     code,_=call(path,'POST',body);check('shared parent library rejected via '+representation,code==400)
     if code==204:call('/Library/VirtualFolders?name='+name+'&refreshLibrary=false','DELETE')
 _,folders=call('/Library/VirtualFolders');owned=next(f for f in folders if f['ItemId'].replace('-','')==alice['libraryId'].replace('-',''))
-code,_=call('/Library/VirtualFolders/LibraryOptions','POST',{'Id':alice['libraryId'],'LibraryOptions':owned['LibraryOptions']});check('own private-library options remain editable',code==204)
+code,_=call('/Library/VirtualFolders/LibraryOptions','POST',{'Id':alice['libraryId'],'LibraryOptions':owned['LibraryOptions']});check('shared-library options remain editable',code==204)
 _,allusers=call('/Users');newuser=next((u for u in allusers if u['Name']=='tube-newbie'),None)
 if newuser is None:_,newuser=call('/Users/New','POST',{'Name':'tube-newbie','Password':s['password']})
-_,newviews=call('/Users/'+newuser['Id']+'/Views');check('new users do not inherit private native libraries',not any(v['Name'].startswith('YouTube') for v in newviews.get('Items',[])))
-policy=newuser['Policy'];policy['EnableAllFolders']=True;call('/Users/'+newuser['Id']+'/Policy','POST',policy)
-_,newviews=call('/Users/'+newuser['Id']+'/Views');check('all-library policy edits preserve native privacy',not any(v['Name'].startswith('YouTube') for v in newviews.get('Items',[])))
+_,newviews=call('/Users/'+newuser['Id']+'/Views')
+check('new users with all-library access see JellyTube',any(v['Name']=='JellyTube' for v in newviews.get('Items',[])))
 code,_=call('/JellyTube/Admin/Health',token=alice['token']);check('non-admin cannot access administration',code==403)
 video='aqz-KE-bpKQ'
 code,data=call('/JellyTube/Search?query='+video,token=alice['token']);check('managed video metadata lookup',code==200 and data['items'][0]['id']==video)
 code,_=call('/JellyTube/Me/Favorites/'+video,'PUT',token=alice['token']);check('save favorite',code==204)
-_,a=call('/JellyTube/Me/Library',token=alice['token']);_,b=call('/JellyTube/Me/Library',token=bob['token']);check('favorites are private',len(a['favorites'])==1 and len(b['favorites'])==0)
+_,a=call('/JellyTube/Me/Library',token=alice['token']);_,b=call('/JellyTube/Me/Library',token=bob['token']);check('favorites are private',any(v['video']['id']==video for v in a['favorites']) and not any(v['video']['id']==video for v in b['favorites']))
 _,playlist=call('/JellyTube/Me/Playlists','POST',{'name':'Alice private test'},alice['token'])
 code,_=call('/JellyTube/Me/Playlists/'+playlist['id'],'PUT',playlist,bob['token']);check('other user cannot edit playlist',code==409)
 code,item=call('/JellyTube/Videos/'+video+'/Prepare','POST',token=alice['token']);check('native preparation accepted',code==200)
@@ -58,9 +57,10 @@ check('native video indexed',code==200 and bool(item.get('itemId')))
 if not item.get('itemId'):raise SystemExit(1)
 s['testItemId']=item['itemId'];(live/'session.json').write_text(json.dumps(s,indent=2))
 code,ownerItem=call('/Users/'+alice['id']+'/Items/'+item['itemId'],token=alice['token']);check('owner can open native item',code==200)
-code,otherItem=call('/Users/'+bob['id']+'/Items/'+item['itemId'],token=bob['token']);check('other user cannot open native item by guessed ID',code in [403,404])
-code,_=call('/Items/'+item['itemId']+'/PlaybackInfo','POST',{'UserId':bob['id'],'IsPlayback':True},bob['token']);check('other user cannot negotiate private native playback',code in [403,404])
-if code==200:print('Native library access bypass detected; release must not expose capabilities through unprotected item DTOs.')
+code,other=call('/JellyTube/Videos/'+video+'/Prepare','POST',token=bob['token'])
+check('both accounts prepare the same native item',code==200 and other.get('itemId')==item['itemId'])
+code,otherItem=call('/Users/'+bob['id']+'/Items/'+item['itemId'],token=bob['token'])
+check('shared item keeps native favorite state separate',code==200 and not otherItem.get('UserData',{}).get('IsFavorite'))
 call('/JellyTube/Me/Library',token=alice['token']);_,nativeItem=call('/Users/'+alice['id']+'/Items/'+item['itemId'],token=alice['token'])
 check('favorite appears in native Jellyfin user data',nativeItem.get('UserData',{}).get('IsFavorite'))
 call('/UserFavoriteItems/'+item['itemId']+'?userId='+alice['id'],'DELETE',token=alice['token'])
@@ -83,6 +83,9 @@ try:
         with urllib.request.urlopen(urllib.request.Request(url,headers={'Range':'bytes=0-4095'}),timeout=30) as r:
             check('retained copy streams with native byte ranges',r.status==206 and len(r.read())==4096)
         code,_=call('/JellyTube/Me/Retained/'+video,'DELETE',token=alice['token']);check('explicit retained-copy removal',code==204)
+    _,jobs=call('/JellyTube/Me/Downloads',token=bob['token'])
+    if any(j['id']==video and j['status']=='Ready' for j in jobs):
+        code,_=call('/JellyTube/Me/Retained/'+video,'DELETE',token=bob['token']);check('last shared copy can be removed',code==204)
     with urllib.request.urlopen(url,timeout=90) as r:manifest=r.read();check('managed DASH manifest serves',r.status==200)
     doc=ET.fromstring(manifest);ns={'d':'urn:mpeg:dash:schema:mpd:2011'};tracks=doc.findall('.//d:BaseURL',ns);check('manifest includes audio and video',len(tracks)==2)
     req=urllib.request.Request(tracks[0].text,headers={'Range':'bytes=0-4095'})

@@ -56,7 +56,7 @@ public sealed record AdminSettings(string PublicBaseUrl, string MediaRoot, long 
     int SearchCallsPerDay, int UserSearchCallsPerDay, string[] DeniedUsers, string? ApiKey = null, string[]? DownloadDeniedUsers = null, string MinimumSafeSearch = "moderate");
 
 [ApiController, Route("JellyTube"), Authorize, JellyTubeErrors, JellyTubeJson]
-public sealed class JellyTubeController(Store store, Access access, Catalog catalog, Extractor extractor, NativeLibrary native, Downloads downloads, JellyfinMuxer muxer, NativeUserData nativeUserData) : ControllerBase
+public sealed class JellyTubeController(Store store, Access access, Catalog catalog, Extractor extractor, NativeLibrary native, Downloads downloads, JellyfinMuxer muxer, NativeUserData nativeUserData, LibraryPrivacy privacy) : ControllerBase
 {
     private string Owner()
     {
@@ -81,7 +81,8 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
     public ActionResult Session()
     {
         var owner = Owner();
-        var binding = Plugin.Instance.Configuration.Libraries.FirstOrDefault(l => l.UserId == owner);
+        var config = Plugin.Instance.Configuration;
+        var binding = access.CanUse(owner) ? config.SharedLibrary ?? config.Libraries.FirstOrDefault(l => l.UserId == owner) : null;
         return Ok(new { userId = owner, admin = access.IsAdmin(owner), nativeLibrary = binding is null ? null : new { libraryId = binding.LibraryId },
             downloads = Plugin.Instance.Configuration.EnableDownloads && !Plugin.Instance.Configuration.DownloadDeniedUsers.Contains(owner, StringComparer.OrdinalIgnoreCase), settings = store.Settings(owner),
             minimumSafeSearch = Plugin.Instance.Configuration.MinimumSafeSearch,
@@ -119,7 +120,7 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
         access.Binding(owner);
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var video = await Video(owner, id, ct);
-        var height = store.Settings(owner).MaxHeight;
+        var height = Plugin.Instance.Configuration.SharedLibrary is null ? store.Settings(owner).MaxHeight : MediaController.SharedStreamHeight;
         if (downloads.PlaybackFile(id, height, store.Get<MediaAsset>(owner, "asset", id)) is null)
             _ = extractor.WarmAdaptive(id, height);
         var asset = await native.Prepare(owner, video, ct);
@@ -166,7 +167,7 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
     {
         var owner = Owner(); var video = await Video(owner, id, ct);
         store.Put(owner, kind == "Favorites" ? "favorite" : "later", id, new SavedVideo(video, DateTimeOffset.UtcNow));
-        if (Plugin.Instance.Configuration.Libraries.Any(l => l.UserId == owner)) await native.Prepare(owner, video, ct);
+        if (access.CanUse(owner)) await native.Prepare(owner, video, ct);
         if (kind == "Favorites") await nativeUserData.SetFavorite(owner, id, true, ct); return NoContent();
     }
     [HttpGet("Me/Recommendations/Topics")]
@@ -268,7 +269,8 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
     {
         Owner(); var c = Plugin.Instance.Configuration;
         return Ok(new { c.PublicBaseUrl, mediaRoot = native.MediaRoot, c.StorageBudgetMb, c.EnableDownloads, c.SearchCallsPerDay, c.UserSearchCallsPerDay,
-            c.DeniedUsers, c.DownloadDeniedUsers, c.MinimumSafeSearch, apiKeyPresent = !string.IsNullOrWhiteSpace(c.ApiKey), libraries = c.Libraries,
+            c.DeniedUsers, c.DownloadDeniedUsers, c.MinimumSafeSearch, apiKeyPresent = !string.IsNullOrWhiteSpace(c.ApiKey),
+            sharedLibrary = c.SharedLibrary, legacyLibraryCount = c.Libraries.Count,
             users = access.Users().Select(u => new { id = Rules.Owner(u.Id), name = u.Username, admin = access.Administrator(u) }) });
     }
     [HttpPut("Admin/Settings"), Authorize(Policy = "RequiresElevation")]
@@ -279,23 +281,26 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
             throw new ValidationException("Invalid storage or search limits.");
         if (!Uri.TryCreate(request.PublicBaseUrl, UriKind.Absolute, out var url) || url.Scheme is not ("https" or "http") || !string.IsNullOrEmpty(url.UserInfo) || !string.IsNullOrEmpty(url.Query) || !string.IsNullOrEmpty(url.Fragment))
             throw new ValidationException("Enter the Jellyfin URL reachable by your clients, including any reverse-proxy base path.");
-        if (c.Libraries.Count > 0 && !Path.GetFullPath(request.MediaRoot).Equals(native.MediaRoot, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
-            throw new ValidationException("The media root cannot be changed while private libraries exist.");
+        if ((c.Libraries.Count > 0 || c.SharedLibrary is not null) && !Path.GetFullPath(request.MediaRoot).Equals(native.MediaRoot, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+            throw new ValidationException("The media root cannot be changed while a JellyTube library exists.");
         access.CheckMediaRoot(request.MediaRoot);
         foreach (var id in request.DeniedUsers) if (!Guid.TryParseExact(id, "N", out _)) throw new ValidationException("Invalid denied user ID.");
         foreach (var id in request.DownloadDeniedUsers ?? []) if (!Guid.TryParseExact(id, "N", out _)) throw new ValidationException("Invalid download user ID.");
         if (request.MinimumSafeSearch is not ("strict" or "moderate")) throw new ValidationException("Invalid minimum SafeSearch setting.");
         var changedUrl = c.PublicBaseUrl != request.PublicBaseUrl.TrimEnd('/');
+        var reenabled = c.DeniedUsers.Except(request.DeniedUsers, StringComparer.OrdinalIgnoreCase).ToArray();
         c.PublicBaseUrl = request.PublicBaseUrl.TrimEnd('/'); c.MediaRoot = Path.GetFullPath(request.MediaRoot);
         c.StorageBudgetMb = request.StorageBudgetMb; c.EnableDownloads = request.EnableDownloads; c.SearchCallsPerDay = request.SearchCallsPerDay;
         c.UserSearchCallsPerDay = request.UserSearchCallsPerDay; c.DeniedUsers = request.DeniedUsers.Select(id => Guid.Parse(id).ToString("N")).Distinct().ToArray();
         c.DownloadDeniedUsers = (request.DownloadDeniedUsers ?? c.DownloadDeniedUsers).Select(id => Guid.Parse(id).ToString("N")).Distinct().ToArray(); c.MinimumSafeSearch = request.MinimumSafeSearch;
         if (request.ApiKey is not null) c.ApiKey = request.ApiKey.Trim(); Plugin.Instance.UpdateConfiguration(c);
+        await native.RestoreSharedAccess(reenabled);
+        await privacy.Enforce();
         if (changedUrl) await native.RewriteUrls(ct); return NoContent();
     }
-    [HttpPost("Admin/Libraries/{userId}"), Authorize(Policy = "RequiresElevation")]
-    public async Task<ActionResult> Provision(string userId, CancellationToken ct)
-    { Owner(); if (!Guid.TryParse(userId, out var id)) throw new ValidationException("Invalid user."); return Ok(await native.Provision(Rules.Owner(id), ct)); }
+    [HttpPost("Admin/Library"), Authorize(Policy = "RequiresElevation")]
+    public async Task<ActionResult> Provision(CancellationToken ct)
+    { Owner(); return Ok(await native.Provision(ct)); }
     [HttpGet("Admin/Health"), Authorize(Policy = "RequiresElevation")]
     public ActionResult Health()
     {
@@ -305,7 +310,6 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
             mediaUrlConfigured = Uri.TryCreate(Plugin.Instance.Configuration.PublicBaseUrl, UriKind.Absolute, out var mediaUrl)
                 && mediaUrl.Scheme is "http" or "https" && string.IsNullOrEmpty(mediaUrl.UserInfo)
                 && string.IsNullOrEmpty(mediaUrl.Query) && string.IsNullOrEmpty(mediaUrl.Fragment),
-            libraries = Plugin.Instance.Configuration.Libraries.Count,
-            libraryDirectoriesAvailable = Plugin.Instance.Configuration.Libraries.Count(binding => Directory.Exists(binding.Root)) });
+            sharedLibraryAvailable = Plugin.Instance.Configuration.SharedLibrary is { } binding && Directory.Exists(binding.Root) });
     }
 }

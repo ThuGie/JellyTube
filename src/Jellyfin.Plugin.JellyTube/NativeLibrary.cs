@@ -8,10 +8,11 @@ using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.IO;
+using MediaBrowser.Model.Entities;
 
 namespace Jellyfin.Plugin.JellyTube;
 
-public sealed class NativeLibrary(Store store, Access access, ILibraryManager library, IUserManager users, IFileSystem fileSystem, ILibraryMonitor monitor)
+public sealed class NativeLibrary(Store store, Access access, ILibraryManager library, IUserManager users, IFileSystem fileSystem, ILibraryMonitor monitor, IUserDataManager userData)
 {
     // Newer Jellyfin builds add an optional collection type to this method.
     private static readonly MethodInfo ResolvePathMethod = typeof(ILibraryManager).GetMethods()
@@ -29,48 +30,88 @@ public sealed class NativeLibrary(Store store, Access access, ILibraryManager li
     public string MediaRoot => string.IsNullOrWhiteSpace(Plugin.Instance.Configuration.MediaRoot)
         ? Path.Combine(Plugin.Instance.DataFolderPath, "media") : Path.GetFullPath(Plugin.Instance.Configuration.MediaRoot);
 
-    /// <summary>Explicit administrator action. Preserves existing library access while making the new library owner-only.</summary>
-    public async Task<LibraryBinding> Provision(string owner, CancellationToken ct)
+    public const string SharedOwner = "shared";
+    public async Task RestoreSharedAccess(IEnumerable<string> owners)
     {
-        var user = access.User(owner);
+        if (Plugin.Instance.Configuration.SharedLibrary is not { } shared) return;
+        var id = Guid.Parse(shared.LibraryId);
+        foreach (var owner in owners)
+        {
+            var user = users.GetUserById(Guid.Parse(owner));
+            if (user is null) continue;
+            var policy = users.GetUserDto(user).Policy;
+            if (policy.EnableAllFolders || policy.EnabledFolders.Contains(id)) continue;
+            policy.EnabledFolders = [.. policy.EnabledFolders, id];
+            await users.UpdatePolicyAsync(user.Id, policy);
+        }
+    }
+    public async Task<LibraryBinding> Provision(CancellationToken ct)
+    {
         await _provision.WaitAsync(ct);
         try
         {
             var config = Plugin.Instance.Configuration;
-            if (config.Libraries.Any(x => x.UserId == owner)) return access.Binding(owner);
-            access.CheckMediaRoot(MediaRoot);
-            var root = Rules.Inside(MediaRoot, owner); Directory.CreateDirectory(root);
-            var oldLibraries = library.GetVirtualFolders().Select(x => Guid.Parse(x.ItemId)).ToArray();
-            var name = "YouTube · " + user.Username;
-            var snapshots = access.Users().ToDictionary(u => u.Id, u => users.GetUserDto(u).Policy);
-            await library.AddVirtualFolder(name, null, new LibraryOptions
+            if (config.SharedLibrary is null)
             {
-                PathInfos = [new MediaPathInfo { Path = root }], EnableRealtimeMonitor = true,
-                TypeOptions = new[] { "Movie", "Video", "Folder", "Series" }.Select(t => new TypeOptions { Type = t, MetadataFetchers = [], ImageFetchers = [] }).ToArray(),
-                EnableChapterImageExtraction = false, EnableAutomaticSeriesGrouping = false
-            }, true);
-            var added = library.GetVirtualFolders().Single(x => x.Name == name);
-            try
-            {
-                foreach (var other in access.Users())
+                access.CheckMediaRoot(MediaRoot);
+                var root = Rules.Inside(MediaRoot, "library");
+                Directory.CreateDirectory(root);
+                const string name = "JellyTube";
+                var added = library.GetVirtualFolders().SingleOrDefault(folder => folder.Name == name);
+                if (added is null)
                 {
-                    var policy = users.GetUserDto(other).Policy;
-                    if (policy.IsAdministrator) continue;
-                    var allowed = policy.EnableAllFolders ? oldLibraries.ToList() : policy.EnabledFolders.ToList();
-                    if (other.Id == user.Id && !allowed.Contains(Guid.Parse(added.ItemId))) allowed.Add(Guid.Parse(added.ItemId));
-                    policy.EnableAllFolders = false; policy.EnabledFolders = allowed.ToArray();
-                    await users.UpdatePolicyAsync(other.Id, policy);
+                    await library.AddVirtualFolder(name, null, new LibraryOptions
+                    {
+                        PathInfos = [new MediaPathInfo { Path = root }], EnableRealtimeMonitor = true,
+                        TypeOptions = new[] { "Movie", "Video", "Folder", "Series" }.Select(type => new TypeOptions
+                            { Type = type, MetadataFetchers = [], ImageFetchers = [] }).ToArray(),
+                        EnableChapterImageExtraction = false, EnableAutomaticSeriesGrouping = false
+                    }, true);
+                    added = library.GetVirtualFolders().Single(folder => folder.Name == name);
                 }
-                var binding = new LibraryBinding(owner, added.ItemId, root);
-                config.Libraries.Add(binding); Plugin.Instance.UpdateConfiguration(config);
-                return access.Binding(owner);
+                if (added.Locations is not { Length: 1 } locations || !Rules.PathsOverlap(locations[0], root)
+                    || !Path.GetFullPath(locations[0]).Equals(root, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+                    throw new InvalidOperationException("A different Jellyfin library is already named JellyTube.");
+                config.SharedLibrary = new LibraryBinding(SharedOwner, added.ItemId, root);
+                Plugin.Instance.UpdateConfiguration(config);
             }
-            catch
+            var shared = config.SharedLibrary;
+            var sharedId = Guid.Parse(shared.LibraryId);
+            foreach (var user in access.Users())
             {
-                config.Libraries.RemoveAll(b => b.UserId == owner && b.LibraryId == added.ItemId); Plugin.Instance.UpdateConfiguration(config);
-                foreach (var snapshot in snapshots) await users.UpdatePolicyAsync(snapshot.Key, snapshot.Value);
-                await library.RemoveVirtualFolder(name, true); throw;
+                var policy = users.GetUserDto(user).Policy;
+                if (policy.IsAdministrator) continue;
+                var denied = config.DeniedUsers.Contains(Rules.Owner(user.Id), StringComparer.OrdinalIgnoreCase);
+                if (policy.EnableAllFolders && !denied) continue;
+                var allowed = policy.EnableAllFolders
+                    ? library.GetVirtualFolders().Select(folder => Guid.Parse(folder.ItemId)).ToHashSet()
+                    : policy.EnabledFolders.ToHashSet();
+                if (denied) allowed.Remove(sharedId);
+                else allowed.Add(sharedId);
+                policy.EnableAllFolders = false;
+                policy.EnabledFolders = allowed.ToArray();
+                await users.UpdatePolicyAsync(user.Id, policy);
             }
+
+            foreach (var legacy in config.Libraries.ToArray())
+            {
+                ct.ThrowIfCancellationRequested();
+                var user = Guid.TryParse(legacy.UserId, out var id) ? users.GetUserById(id) : null;
+                if (user is null || !access.CanUse(legacy.UserId)) continue;
+                foreach (var asset in store.List<MediaAsset>(legacy.UserId, "asset"))
+                    await Prepare(legacy.UserId, asset.Video, ct);
+                var folder = library.GetVirtualFolders().SingleOrDefault(entry => entry.ItemId == legacy.LibraryId);
+                if (folder is not null)
+                {
+                    if (folder.Locations is not { Length: 1 } oldLocations
+                        || !Path.GetFullPath(oldLocations[0]).Equals(Path.GetFullPath(legacy.Root), OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+                        throw new InvalidOperationException("A legacy library location changed. Review it in Jellyfin before retiring it.");
+                    await library.RemoveVirtualFolder(folder.Name, false);
+                }
+                config.Libraries.Remove(legacy);
+                Plugin.Instance.UpdateConfiguration(config);
+            }
+            return shared;
         }
         finally { _provision.Release(); }
     }
@@ -82,11 +123,12 @@ public sealed class NativeLibrary(Store store, Access access, ILibraryManager li
             || publicUrl.Scheme is not ("http" or "https") || !string.IsNullOrEmpty(publicUrl.UserInfo)
             || !string.IsNullOrEmpty(publicUrl.Query) || !string.IsNullOrEmpty(publicUrl.Fragment))
             throw new InvalidOperationException("Set the externally reachable Jellyfin base URL in JellyTube administrator settings.");
-        var key = owner + ":" + video.Id; var gate = _locks.GetOrAdd(key, _ => new(1)); await gate.WaitAsync(ct);
+        var mediaOwner = binding.UserId;
+        var key = mediaOwner + ":" + video.Id; var gate = _locks.GetOrAdd(key, _ => new(1)); await gate.WaitAsync(ct);
         string? changingDirectory = null;
         try
         {
-            var asset = store.Get<MediaAsset>(owner, "asset", video.Id);
+            var asset = store.Get<MediaAsset>(mediaOwner, "asset", video.Id);
             if (asset is null)
             {
                 var dir = Rules.Inside(binding.Root, video.Id);
@@ -94,10 +136,10 @@ public sealed class NativeLibrary(Store store, Access access, ILibraryManager li
                 changingDirectory = dir;
                 Directory.CreateDirectory(dir);
                 video = video with { Title = video.Title[..Math.Min(video.Title.Length, 500)], Description = video.Description?[..Math.Min(video.Description.Length, 20000)] };
-                asset = new(video.Id, owner, video, dir, Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant());
-                store.Put(owner, "asset", video.Id, asset);
+                asset = new(video.Id, mediaOwner, video, dir, Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant());
+                store.Put(mediaOwner, "asset", video.Id, asset);
             }
-            var url = Plugin.Instance.Configuration.PublicBaseUrl.TrimEnd('/') + "/JellyTube/Media/" + owner + "/" + video.Id + "/" + asset.Secret + "/manifest.mpd";
+            var url = Plugin.Instance.Configuration.PublicBaseUrl.TrimEnd('/') + "/JellyTube/Media/" + mediaOwner + "/" + video.Id + "/" + asset.Secret + "/manifest.mpd";
             var strm = Path.Combine(asset.Directory, "video.strm");
             if (!File.Exists(strm) || await File.ReadAllTextAsync(strm, ct) != url)
             {
@@ -114,7 +156,7 @@ public sealed class NativeLibrary(Store store, Access access, ILibraryManager li
                     new XElement("thumb", asset.Video.Thumbnail)));
                 await File.WriteAllTextAsync(Path.Combine(asset.Directory, "video.nfo"), doc.ToString(), ct);
             }
-            var scanGate = _scans.GetOrAdd(owner, _ => new(1));
+            var scanGate = _scans.GetOrAdd(mediaOwner, _ => new(1));
             await scanGate.WaitAsync(ct);
             Video item;
             try
@@ -124,10 +166,19 @@ public sealed class NativeLibrary(Store store, Access access, ILibraryManager li
             }
             finally { scanGate.Release(); }
             if (!item.IsVisible(access.User(owner)))
-                throw new UnauthorizedAccessException("Jellyfin did not grant access to this video in your private library.");
+                throw new UnauthorizedAccessException("Jellyfin did not grant access to this video in the JellyTube library.");
             if (item.Id.ToString("N") != asset.ItemId)
             {
-                asset = asset with { ItemId = item.Id.ToString("N") }; store.Put(owner, "asset", video.Id, asset);
+                asset = asset with { ItemId = item.Id.ToString("N") }; store.Put(mediaOwner, "asset", video.Id, asset);
+            }
+            if (mediaOwner == SharedOwner)
+            {
+                var personal = store.Get<MediaAsset>(owner, "asset", video.Id);
+                MigrateUserData(owner, personal, item, ct);
+                // Preserve the account's retained-file reference and use the shared item for sync.
+                if (personal?.ItemId != asset.ItemId)
+                    store.Put(owner, "asset", video.Id, personal is null ? asset with { Owner = owner }
+                        : personal with { ItemId = asset.ItemId, Directory = asset.Directory });
             }
             return asset;
         }
@@ -188,11 +239,30 @@ public sealed class NativeLibrary(Store store, Access access, ILibraryManager li
             throw;
         }
     }
+    private void MigrateUserData(string owner, MediaAsset? previous, Video item, CancellationToken ct)
+    {
+        if (!Guid.TryParse(previous?.ItemId, out var oldId) || oldId == item.Id || library.GetItemById(oldId) is not { } oldItem) return;
+        var user = access.User(owner);
+        var oldData = userData.GetUserData(user, oldItem);
+        var data = userData.GetUserData(user, item);
+        if (oldData is null || data is null) return;
+        data.IsFavorite |= oldData.IsFavorite;
+        if (data.LastPlayedDate is null || oldData.LastPlayedDate > data.LastPlayedDate)
+        {
+            data.LastPlayedDate = oldData.LastPlayedDate;
+            data.PlaybackPositionTicks = oldData.PlaybackPositionTicks;
+            data.Played = oldData.Played;
+            data.PlayCount = oldData.PlayCount;
+        }
+        userData.SaveUserData(user, item, data, UserDataSaveReason.UpdateUserData, ct);
+    }
+
     public MediaAsset Resolve(string owner, string id, string secret)
     {
-        Rules.VideoId(id); access.Binding(owner);
+        Rules.VideoId(id);
+        if (owner != SharedOwner) access.Binding(owner, legacy: true);
+        else if (Plugin.Instance.Configuration.SharedLibrary is null) throw new UnauthorizedAccessException("Shared playback is unavailable.");
         var asset = store.Get<MediaAsset>(owner, "asset", id);
-        // Each URL is an unguessable revocable capability for exactly one owner/video. It is never a general-purpose proxy.
         if (asset is null || secret.Length != 64 || !CryptographicOperations.FixedTimeEquals(System.Text.Encoding.ASCII.GetBytes(asset.Secret), System.Text.Encoding.ASCII.GetBytes(secret)))
             throw new UnauthorizedAccessException("Invalid media capability.");
         return asset;
@@ -213,14 +283,14 @@ public sealed class NativeLibrary(Store store, Access access, ILibraryManager li
     }
     public async Task RewriteUrls(CancellationToken ct)
     {
-        foreach (var binding in Plugin.Instance.Configuration.Libraries.ToArray())
+        foreach (var binding in Plugin.Instance.Configuration.Libraries.Concat(Plugin.Instance.Configuration.SharedLibrary is { } shared ? [shared] : []).ToArray())
             foreach (var asset in store.List<MediaAsset>(binding.UserId, "asset"))
             {
                 var gate = _locks.GetOrAdd(binding.UserId + ":" + asset.Id, _ => new(1)); await gate.WaitAsync(ct);
                 try
                 {
                     var expected = Rules.Inside(binding.Root, Rules.VideoId(asset.Id));
-                    if (!Path.GetFullPath(asset.Directory).Equals(expected, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)) throw new InvalidOperationException("Media directory does not match its library owner.");
+                    if (!Path.GetFullPath(asset.Directory).Equals(expected, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)) continue;
                     var path = Path.Combine(expected, "video.strm"); if (!File.Exists(path)) continue;
                     var url = Plugin.Instance.Configuration.PublicBaseUrl.TrimEnd('/') + "/JellyTube/Media/" + binding.UserId + "/" + asset.Id + "/" + asset.Secret + "/manifest.mpd";
                     if (await File.ReadAllTextAsync(path, ct) != url) { await File.WriteAllTextAsync(path + ".tmp", url, ct); File.Move(path + ".tmp", path, true); }

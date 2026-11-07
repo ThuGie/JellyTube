@@ -13,12 +13,14 @@ namespace Jellyfin.Plugin.JellyTube;
 public sealed class MediaController(Store store, NativeLibrary native, Extractor extractor, IHttpClientFactory http, SegmentCache cache, Downloads downloads,
     Microsoft.Extensions.Logging.ILogger<MediaController> logger) : ControllerBase
 {
+    internal const int SharedStreamHeight = 720;
+    private int Height(string owner) => owner == NativeLibrary.SharedOwner ? SharedStreamHeight : store.Settings(owner).MaxHeight;
     [HttpGet("manifest.mpd"), HttpHead("manifest.mpd")]
     public async Task<ActionResult> Manifest(string owner, string id, string secret, CancellationToken ct)
     {
         var asset = native.Resolve(owner, id, secret);
         Response.Headers.CacheControl = "private, no-store";
-        var height = store.Settings(owner).MaxHeight;
+        var height = Height(owner);
         if (downloads.PlaybackFile(id, height, asset) is not null)
             return Redirect(Plugin.Instance.Configuration.PublicBaseUrl.TrimEnd('/') + "/JellyTube/Media/" + owner + "/" + id + "/" + secret + "/local.mp4");
         var seconds = asset.Video.DurationSeconds;
@@ -65,7 +67,7 @@ public sealed class MediaController(Store store, NativeLibrary native, Extractor
     public ActionResult Local(string owner, string id, string secret)
     {
         var asset = native.Resolve(owner, id, secret);
-        var local = downloads.OpenPlayback(id, store.Settings(owner).MaxHeight, asset, Response);
+        var local = downloads.OpenPlayback(id, Height(owner), asset, Response);
         if (local is null) return NotFound();
         Response.Headers.CacheControl = "private, no-store";
         return File(local, "video/mp4", enableRangeProcessing: true);
@@ -73,7 +75,7 @@ public sealed class MediaController(Store store, NativeLibrary native, Extractor
     [HttpGet("{track:regex(^(video|audio)$)}.mp4"), HttpHead("{track:regex(^(video|audio)$)}.mp4")]
     public async Task Stream(string owner, string id, string secret, string track, [FromQuery] int? height, [FromQuery] string? identity, CancellationToken ct)
     {
-        native.Resolve(owner, id, secret); var selectedHeight = height ?? store.Settings(owner).MaxHeight;
+        native.Resolve(owner, id, secret); var selectedHeight = owner == NativeLibrary.SharedOwner ? SharedStreamHeight : height ?? Height(owner);
         if (selectedHeight is not (360 or 480 or 720 or 1080 or 1440 or 2160)) throw new System.ComponentModel.DataAnnotations.ValidationException("Invalid media quality.");
         using var transport = await cache.Enter(ct);
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct); deadline.CancelAfter(TimeSpan.FromMinutes(30));

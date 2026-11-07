@@ -13,7 +13,7 @@ public sealed class LibraryPrivacy(Access access, IUserManager users, ILibraryMa
     private readonly SemaphoreSlim _gate = new(1);
     public async Task Enforce()
     {
-        if (Plugin.Instance.Configuration.Libraries.Count == 0) return;
+        if (Plugin.Instance.Configuration.Libraries.Count == 0 && Plugin.Instance.Configuration.SharedLibrary is null) return;
         await _gate.WaitAsync();
         try
         {
@@ -23,6 +23,10 @@ public sealed class LibraryPrivacy(Access access, IUserManager users, ILibraryMa
             {
                 var policy = users.GetUserDto(user).Policy; if (policy.IsAdministrator) continue;
                 var forbidden = bindings.Where(b => b.UserId != Rules.Owner(user.Id)).Select(b => Guid.Parse(b.LibraryId)).ToHashSet();
+                if (Plugin.Instance.Configuration.SharedLibrary is { } shared
+                    && Plugin.Instance.Configuration.DeniedUsers.Contains(Rules.Owner(user.Id), StringComparer.OrdinalIgnoreCase))
+                    forbidden.Add(Guid.Parse(shared.LibraryId));
+                if (forbidden.Count == 0) continue;
                 var previous = policy.EnableAllFolders ? all : policy.EnabledFolders;
                 var allowed = previous.Where(id => !forbidden.Contains(id)).ToArray();
                 if (!policy.EnableAllFolders && policy.EnabledFolders.SequenceEqual(allowed)) continue;
@@ -50,7 +54,7 @@ public sealed class LibraryPrivacyFilter(LibraryPrivacy privacy, Access access) 
             Guid.TryParse(requestedId, out var libraryId);
             if (candidates.Any(path => access.OverlapsPrivateLibrary(path) && !(before.ActionName == "UpdateLibraryOptions" && access.UnchangedLibraryRoot(libraryId, path))))
             {
-                context.Result = new BadRequestObjectResult(new { error = "This path overlaps a private JellyTube library. Choose a separate directory." }); return;
+                context.Result = new BadRequestObjectResult(new { error = "This path overlaps a managed JellyTube library. Choose a separate directory." }); return;
             }
         }
         var result = await next();

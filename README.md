@@ -25,9 +25,9 @@ Open **Catalog**, install **JellyTube**, then restart Jellyfin. The repository a
 
 1. Download or build `JellyTube_0.1.0.0.zip`. Stop Jellyfin, extract it into a new **JellyTube** directory in that Jellyfin installation's plugin directory, then restart. Use the plugin directory belonging to your Synology package; package paths vary. Do not copy probe/test output into the plugin directory.
 2. Open **Dashboard → Plugins → JellyTube**. Set the Jellyfin URL reachable by clients and the NAS itself, including any reverse-proxy base path. Set a writable, dedicated media root outside all existing shared library folders, and a storage budget. Overlapping library paths are rejected to preserve privacy. A Synology shared folder needs write permission for the Jellyfin package account. No package-specific filesystem path is hardcoded.
-3. Click **Create private library** for each intended account. This creates a normal YouTube library for that user. Other non-admin users keep access to their existing libraries through an explicit list rather than “all libraries”; this prevents access to the new private library. New accounts and policy edits are restricted automatically. Administrators retain their normal access. JellyTube libraries are intentionally private and cannot be shared through an all-library policy.
+3. Click **Create shared library** once. If upgrading, choose **Set up shared library and migrate**. JellyTube copies native favorites and playback state for eligible accounts before retiring their old library entries. Accounts with library access can browse all registered videos. Personal collections and viewing activity remain account-specific.
 4. Open Jellyfin Web and hard-refresh after installation; its header gains **YouTube**. Navigation is injected by JellyTube itself into the served index, without changing installed web files. **File Transformation is not required.** Existing plugins using File Transformation can coexist with this integration.
-5. Search or paste a YouTube video URL. **Play** registers the video directly and opens Jellyfin's player. Jellyfin can start buffering the stream or read the retained download immediately. Saving Favorites or Watch Later also registers the video in your private native library.
+5. Search or paste a YouTube video URL. **Play** registers the video directly and opens Jellyfin's player. Jellyfin can start buffering the stream or read the retained download immediately. Saving Favorites or Watch Later also registers the video in the shared native library.
 
 YouTube API credentials are optional. Managed discovery supports video, channel and playlist search without a Google account. An optional server-side Data API key enables official video discovery with region/language and SafeSearch filters. Channel/playlist discovery uses the managed adapter. SafeSearch is not a parental-control guarantee, and it is unavailable for managed discovery.
 
@@ -40,13 +40,13 @@ YouTube API credentials are optional. Managed discovery supports video, channel 
 - Native Jellyfin favorites and resume state are bridged to JellyTube once a native item exists. Changing favorites in either interface updates the other on refresh.
 - Persistent managed download queue with cancellation, retry, restart recovery, per-user visibility, storage limits, atomic publication and explicit local-copy removal.
 - Data export and separate JellyTube history clearing. Jellyfin's native history/resume settings remain under Jellyfin's control.
-- Admin health, account access, per-user download permissions, private-library setup, search budgets, minimum official SafeSearch and optional API key configuration.
+- Admin health, account access, per-user download permissions, shared-library setup, search budgets, minimum official SafeSearch and optional API key configuration.
 
 ## Playback and native clients
 
-Native clients use the standard private Jellyfin library and its native player. Custom YouTube discovery screens are provided by the web integration; a server plugin cannot add arbitrary search screens to every TV/mobile app. Browsers were tested at desktop and mobile sizes. A mobile browser test is not a physical Android/iOS or TV-app certification.
+Native clients use the shared JellyTube library and its native player. Custom YouTube discovery screens are provided by the web integration; a server plugin cannot add arbitrary search screens to every TV/mobile app. Browsers were tested at desktop and mobile sizes. A mobile browser test is not a physical Android/iOS or TV-app certification.
 
-The maximum resolution is a cap. Format selection prefers H.264/AAC to avoid unnecessary video transcoding on a NAS; a lower compatible resolution may be selected. Jellyfin applies the device profile and the user's normal transcode/remux permissions. The web queue preference queues up to 20 subsequent videos from the displayed list for the local player; native apps retain their own queue controls.
+Shared playback uses a 720p cap. The per-user maximum resolution applies to downloads. Format selection prefers H.264/AAC to avoid unnecessary video transcoding on a NAS; a lower compatible resolution may be selected. Jellyfin applies the device profile and the user's normal transcode/remux permissions. The web queue preference queues up to 20 subsequent videos from the displayed list for the local player; native apps retain their own queue controls.
 
 Public on-demand videos are the initial scope. Private, age/region-restricted, live/DVR, DRM and verification-required videos may be unavailable. Personal Google cookies are not imported. YouTube can change extraction behavior; fixes ship as a plugin/dependency update, not a new NAS command-line requirement.
 

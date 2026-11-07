@@ -109,6 +109,27 @@ public sealed class Catalog(Store store, Extractor extractor, IHttpClientFactory
                 Extractor.Text(snippet, "channelId"), "https://i.ytimg.com/vi/" + id + "/hqdefault.jpg",
                 PublishedAt: DateTimeOffset.TryParse(Extractor.Text(snippet, "publishedAt"), out var published) ? published : null));
         }
+        if (items.Count > 0)
+        {
+            var durationsUrl = "https://www.googleapis.com/youtube/v3/videos?part=contentDetails&id="
+                + string.Join(',', items.Select(item => item.Id)) + "&key=" + Uri.EscapeDataString(Plugin.Instance.Configuration.ApiKey);
+            try
+            {
+                using var durations = await http.CreateClient("JellyTube.Catalog").GetAsync(durationsUrl, ct);
+                if (durations.IsSuccessStatusCode)
+                {
+                    using var metadata = JsonDocument.Parse(await durations.Content.ReadAsStringAsync(ct));
+                    var lengths = new Dictionary<string, double>(StringComparer.Ordinal);
+                    foreach (var item in metadata.RootElement.GetProperty("items").EnumerateArray())
+                    {
+                        try { lengths[Extractor.Text(item, "id")] = System.Xml.XmlConvert.ToTimeSpan(Extractor.Text(item.GetProperty("contentDetails"), "duration")).TotalSeconds; }
+                        catch (FormatException) { }
+                    }
+                    items = items.Select(item => lengths.TryGetValue(item.Id, out var seconds) ? item with { DurationSeconds = seconds } : item).ToList();
+                }
+            }
+            catch (Exception ex) when (ex is HttpRequestException or JsonException) { /* Keep search results when duration lookup fails. */ }
+        }
         return new(items, Extractor.Text(doc.RootElement, "nextPageToken", "") is { Length: > 0 } token ? token : null);
     }
 }

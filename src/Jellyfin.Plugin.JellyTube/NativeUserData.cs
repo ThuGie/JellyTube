@@ -24,9 +24,15 @@ public sealed class NativeUserData(Store store, Access access, ILibraryManager l
     {
         var user = access.User(owner); var settings = store.Settings(owner);
         var cleared = store.Get<DateTimeOffset?>(owner, "historyClear", "current");
-        foreach (var asset in store.List<MediaAsset>(owner, "asset"))
+        var assets = store.List<MediaAsset>(owner, "asset");
+        if (Plugin.Instance.Configuration.SharedLibrary is not null && access.CanUse(owner))
         {
-            var item = library.FindByPath(Path.Combine(asset.Directory, "video.strm"), false); if (item is null) continue;
+            var known = assets.Select(asset => asset.Id).ToHashSet(StringComparer.Ordinal);
+            assets.AddRange(store.List<MediaAsset>(NativeLibrary.SharedOwner, "asset").Where(asset => !known.Contains(asset.Id)));
+        }
+        foreach (var asset in assets)
+        {
+            var item = library.FindByPath(Path.Combine(asset.Directory, "video.strm"), false); if (item is null || !item.IsVisible(user)) continue;
             ct.ThrowIfCancellationRequested(); var data = userData.GetUserData(user, item); if (data is null) continue;
             var saved = store.Get<SavedVideo>(owner, "favorite", asset.Id);
             if (saved is not null && !store.Get<bool>(owner, "favoriteSync", asset.Id))

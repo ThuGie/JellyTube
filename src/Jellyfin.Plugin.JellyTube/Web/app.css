@@ -37,3 +37,24 @@ body.jt-open > .docspinner { display:none !important; }
     background: #172c25;
     color: #c4efda;
 }
+
+#jt-app .jt-feed-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 16px 0 24px;
+}
+#jt-app .jt-feed-tabs button[aria-pressed=true] {
+    background: var(--jt-text);
+    color: var(--jt-panel);
+}
+#jt-app .jt-card-info { min-height: 1.5em; }
+#jt-app .jt-card-description {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    font-size: .875rem;
+    margin: .4em 0 0;
+}
