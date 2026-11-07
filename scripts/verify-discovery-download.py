@@ -49,7 +49,21 @@ try:
         paths=list((live/'data').glob('**/'+video+'/video.strm'));assert paths;url=paths[0].read_text().strip()
         with urllib.request.urlopen(urllib.request.Request(url,headers={'Range':'bytes=0-4095'}),timeout=30) as r:
             data=r.read();check('retained native transport returns a seekable MP4 range',r.status==206 and len(data)==4096 and data[4:8]==b'ftyp')
-        code,_=call('/JellyTube/Me/Retained/'+video,'DELETE',token=bob['token']);check('other account cannot remove retained copy',code==404)
+        _,bob_settings=call('/JellyTube/Me/Settings',token=bob['token'])
+        try:
+            call('/JellyTube/Me/Settings','PUT',dict(bob_settings,maxHeight=360),bob['token'])
+            code,_=call('/JellyTube/Me/Downloads/'+video,'POST',token=bob['token'])
+            check('second account can request the same download',code==202)
+            for _ in range(30):
+                _,other_jobs=call('/JellyTube/Me/Downloads',token=bob['token'])
+                other_job=next(j for j in other_jobs if j['id']==video)
+                if other_job['status'] in ['Ready','Failed','Cancelled']:break
+                time.sleep(1)
+            check('second account reuses the matching shared file',other_job['status']=='Ready' and len(list((live/'data').glob('**/.shared/'+video+'-360.mp4')))==1)
+            code,_=call('/JellyTube/Me/Retained/'+video,'DELETE',token=bob['token'])
+            check('removing one account reference leaves the other playable',code==204 and len(list((live/'data').glob('**/.shared/'+video+'-360.mp4')))==1)
+        finally:
+            call('/JellyTube/Me/Settings','PUT',bob_settings,bob['token'])
 finally:
     call('/JellyTube/Me/Settings','PUT',settings)
     call('/JellyTube/Admin/Settings','PUT',admin,s['token'])

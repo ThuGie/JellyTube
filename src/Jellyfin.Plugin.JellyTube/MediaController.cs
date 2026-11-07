@@ -4,12 +4,14 @@ using System.Xml.Linq;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.JellyTube;
 
 /// <summary>Capability-bound media transport for Jellyfin/FFmpeg/native clients, including byte-range seeking.</summary>
 [ApiController, Route("JellyTube/Media/{owner}/{id}/{secret}"), AllowAnonymous, JellyTubeErrors]
-public sealed class MediaController(Store store, NativeLibrary native, Extractor extractor, IHttpClientFactory http, SegmentCache cache, Downloads downloads) : ControllerBase
+public sealed class MediaController(Store store, NativeLibrary native, Extractor extractor, IHttpClientFactory http, SegmentCache cache, Downloads downloads,
+    Microsoft.Extensions.Logging.ILogger<MediaController> logger) : ControllerBase
 {
     [HttpGet("manifest.mpd"), HttpHead("manifest.mpd")]
     public async Task<ActionResult> Manifest(string owner, string id, string secret, CancellationToken ct)
@@ -26,7 +28,10 @@ public sealed class MediaController(Store store, NativeLibrary native, Extractor
         }
         if (seconds is null or <= 0) throw new ProviderException("Live or unknown-duration videos are not supported in this preview.");
         var prefix = Plugin.Instance.Configuration.PublicBaseUrl.TrimEnd('/') + "/JellyTube/Media/" + owner + "/" + id + "/" + secret + "/";
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var source = await extractor.ResolveAdaptive(id, height, ct);
+        logger.LogDebug("JellyTube media request {Reference} resolved the YouTube source in {ResolutionMs:F0} ms.",
+            HttpContext.TraceIdentifier, System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds);
         var xml = ManifestXml(source, seconds.Value, prefix, height);
         return Content(xml, "application/dash+xml");
     }
@@ -60,10 +65,10 @@ public sealed class MediaController(Store store, NativeLibrary native, Extractor
     public ActionResult Local(string owner, string id, string secret)
     {
         var asset = native.Resolve(owner, id, secret);
-        var local = downloads.PlaybackFile(id, store.Settings(owner).MaxHeight, asset);
+        var local = downloads.OpenPlayback(id, store.Settings(owner).MaxHeight, asset, Response);
         if (local is null) return NotFound();
         Response.Headers.CacheControl = "private, no-store";
-        return PhysicalFile(local, "video/mp4", enableRangeProcessing: true);
+        return File(local, "video/mp4", enableRangeProcessing: true);
     }
     [HttpGet("{track:regex(^(video|audio)$)}.mp4"), HttpHead("{track:regex(^(video|audio)$)}.mp4")]
     public async Task Stream(string owner, string id, string secret, string track, [FromQuery] int? height, [FromQuery] string? identity, CancellationToken ct)

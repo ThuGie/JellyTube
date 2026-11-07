@@ -9,6 +9,8 @@ public sealed class Downloads(Store store, Extractor extractor, JellyfinMuxer mu
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _active = new();
     private readonly SemaphoreSlim _wake = new(0, 1);
     private readonly object _gate = new();
+    private readonly Dictionary<string, int> _readers = new();
+    private readonly HashSet<string> _pendingDeletion = new();
     private string SharedPath(string id, int height) =>
         Rules.Inside(native.MediaRoot, $".shared/{Rules.VideoId(id)}-{height}.mp4");
 
@@ -17,6 +19,77 @@ public sealed class Downloads(Store store, Extractor extractor, JellyfinMuxer mu
         if (asset?.LocalFile is { } local && File.Exists(local)) return local;
         var shared = SharedPath(id, height);
         return File.Exists(shared) ? shared : null;
+    }
+
+    public Stream? OpenPlayback(string id, int height, MediaAsset asset, Microsoft.AspNetCore.Http.HttpResponse response)
+    {
+        lock (_gate)
+        {
+            var path = PlaybackFile(id, height, asset);
+            if (path is null || _pendingDeletion.Contains(path)) return null;
+            var stream = File.OpenRead(path);
+            _readers[path] = _readers.GetValueOrDefault(path) + 1;
+            response.OnCompleted(() =>
+            {
+                stream.Dispose();
+                lock (_gate)
+                {
+                    if (--_readers[path] == 0)
+                    {
+                        _readers.Remove(path);
+                        if (_pendingDeletion.Remove(path)) DeleteUnused(path);
+                    }
+                }
+                return Task.CompletedTask;
+            });
+            return stream;
+        }
+    }
+
+    private IEnumerable<MediaAsset> References(string id, string path) =>
+        access.Users().Select(user => store.Get<MediaAsset>(Rules.Owner(user.Id), "asset", id))
+            .OfType<MediaAsset>().Where(asset => asset.LocalFile == path);
+
+    private void DeleteUnused(string path)
+    {
+        if (_readers.ContainsKey(path)) { _pendingDeletion.Add(path); return; }
+        try { File.Delete(path); }
+        catch (IOException) { logger.LogWarning("A JellyTube media file could not be removed."); }
+        catch (UnauthorizedAccessException) { logger.LogWarning("JellyTube has no permission to remove a media file."); }
+    }
+
+    private void ReuseLegacy(string id, int height, string final)
+    {
+        lock (_gate)
+        {
+            if (File.Exists(final)) return;
+            Span<byte> header = stackalloc byte[8];
+            foreach (var user in access.Users())
+            {
+                var owner = Rules.Owner(user.Id);
+                if (store.Get<DownloadJob>(owner, "download", id) is not { Status: "Ready" } job || job.MaxHeight != height) continue;
+                var legacy = Rules.Inside(native.MediaRoot, $".retained/{owner}/{id}.mp4");
+                var asset = store.Get<MediaAsset>(owner, "asset", id);
+                if (asset?.LocalFile != legacy || !File.Exists(legacy)) continue;
+                using (var input = File.OpenRead(legacy))
+                {
+                    if (input.ReadAtLeast(header, 8, false) != 8 || !header[4..].SequenceEqual("ftyp"u8)) continue;
+                    if (input.Length + StorageBytes() > Plugin.Instance.Configuration.StorageBudgetMb * 1024L * 1024) return;
+                }
+                Directory.CreateDirectory(Path.GetDirectoryName(final)!);
+                var temporary = final + ".tmp";
+                try
+                {
+                    File.Copy(legacy, temporary, true);
+                    if (new FileInfo(temporary).Length != new FileInfo(legacy).Length) throw new IOException("Incomplete shared media copy.");
+                    File.Move(temporary, final);
+                    store.Put(owner, "asset", id, asset with { LocalFile = final });
+                    DeleteUnused(legacy);
+                }
+                finally { File.Delete(temporary); }
+                return;
+            }
+        }
     }
 
     public void RemoveRetained(string owner, string id)
@@ -34,16 +107,10 @@ public sealed class Downloads(Store store, Extractor extractor, JellyfinMuxer mu
                 var path = Path.GetFullPath(local);
                 if (!path.Equals(legacy, comparison) && !path.Equals(shared, comparison))
                     throw new InvalidOperationException("The retained file location is invalid.");
-                var usedByAnotherAccount = path.Equals(shared, comparison) && access.Users().Select(user => Rules.Owner(user.Id))
-                    .Any(other => other != owner && store.Get<MediaAsset>(other, "asset", id)?.LocalFile == local);
-                if (!usedByAnotherAccount)
-                {
-                    try { File.Delete(path); }
-                    catch (IOException) { throw new InvalidOperationException("The retained file is in use. Stop playback and retry."); }
-                }
             }
             store.Put(owner, "asset", id, asset with { LocalFile = null, Retained = false });
             store.Delete(owner, "download", id);
+            if (asset.LocalFile is { } removed && !References(id, removed).Any()) DeleteUnused(removed);
         }
     }
     public DownloadJob Enqueue(string owner, VideoInfo video)
@@ -91,6 +158,7 @@ public sealed class Downloads(Store store, Extractor extractor, JellyfinMuxer mu
             access.Binding(job.Owner);
             if (!Plugin.Instance.Configuration.EnableDownloads || Plugin.Instance.Configuration.DownloadDeniedUsers.Contains(job.Owner, StringComparer.OrdinalIgnoreCase)) throw new ProviderException("Downloads have been disabled for this account.");
             var final = SharedPath(job.Id, job.MaxHeight);
+            ReuseLegacy(job.Id, job.MaxHeight, final);
             var reuse = File.Exists(final);
             if (!reuse && StorageBytes() >= Plugin.Instance.Configuration.StorageBudgetMb * 1024 * 1024) throw new ProviderException("The storage budget is full.");
             lock (_gate)
@@ -129,6 +197,7 @@ public sealed class Downloads(Store store, Extractor extractor, JellyfinMuxer mu
                     File.Move(Path.Combine(staging, "video.mp4"), final, true);
                 }
                 store.Put(job.Owner, "asset", job.Id, asset with { LocalFile = final, Retained = true });
+                _pendingDeletion.Remove(final);
                 // Keep the stable STRM item for progress; the capability serves the retained file through the same native path.
                 store.Put(job.Owner, "download", job.Id, job with { Status = "Ready", Progress = 1, Stage = "Available locally", UpdatedAt = DateTimeOffset.UtcNow });
             }
@@ -158,4 +227,13 @@ public sealed class Downloads(Store store, Extractor extractor, JellyfinMuxer mu
     }
     public long StorageBytes() => Directory.Exists(native.MediaRoot)
         ? Directory.EnumerateFiles(native.MediaRoot, "*", SearchOption.AllDirectories).Where(x => !x.EndsWith(".nfo") && !x.EndsWith(".strm")).Sum(x => { try { return new FileInfo(x).Length; } catch (FileNotFoundException) { return 0; } }) : 0;
+
+    public long SharedBytes()
+    {
+        lock (_gate)
+        {
+            var directory = Rules.Inside(native.MediaRoot, ".shared");
+            return Directory.Exists(directory) ? Directory.EnumerateFiles(directory, "*.mp4").Sum(path => new FileInfo(path).Length) : 0;
+        }
+    }
 }

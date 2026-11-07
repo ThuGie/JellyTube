@@ -23,3 +23,17 @@ body.jt-open > .docspinner { display:none !important; }
 #jt-app .jt-details::backdrop { background: #000a; }
 #jt-app .jt-details button { margin: 8px 8px 0 0; }
 #jt-app .jt-description { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.jt-playback-notice {
+    position: fixed;
+    inset: auto 16px 16px auto;
+    z-index: 2000;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    max-width: calc(100vw - 32px);
+    padding: 12px 16px;
+    border-radius: 10px;
+    background: #172c25;
+    color: #c4efda;
+}

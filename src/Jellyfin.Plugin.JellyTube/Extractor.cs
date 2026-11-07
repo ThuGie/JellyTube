@@ -17,6 +17,7 @@ public sealed class Extractor
     private readonly ConcurrentDictionary<string, Lazy<Task<AdaptiveSource>>> _adaptivePending = new();
     private readonly ConcurrentDictionary<string, AdaptiveSource> _adaptiveCache = new();
     private readonly ConcurrentDictionary<string, (DateTimeOffset Expires, CatalogPage Page)> _uploads = new();
+    private readonly ConcurrentDictionary<string, (DateTimeOffset Expires, VideoInfo Video)> _details = new();
     private readonly IHttpClientFactory _http;
     public Extractor(IHttpClientFactory http) { _http = http; _youtube = new(http.CreateClient("JellyTube.YouTube")); }
     public async Task<AdaptiveSource> ResolveAdaptive(string id, int maxHeight, CancellationToken ct)
@@ -122,12 +123,16 @@ public sealed class Extractor
     public async Task<VideoInfo> Details(string id, CancellationToken ct)
     {
         Rules.VideoId(id);
+        if (_details.TryGetValue(id, out var cached) && cached.Expires > DateTimeOffset.UtcNow) return cached.Video;
         try
         {
             var video = await _youtube.Videos.GetAsync(id, ct);
-            return new(id, video.Title, video.Author.ChannelTitle, video.Author.ChannelId,
+            var details = new VideoInfo(id, video.Title, video.Author.ChannelTitle, video.Author.ChannelId,
                 "https://i.ytimg.com/vi/" + id + "/hqdefault.jpg", video.Duration?.TotalSeconds, video.Description,
                 video.UploadDate, video.Keywords.Take(30).ToArray());
+            if (_details.Count >= 256) foreach (var old in _details.OrderBy(entry => entry.Value.Expires).Take(64)) _details.TryRemove(old.Key, out _);
+            _details[id] = (DateTimeOffset.UtcNow.AddMinutes(30), details);
+            return details;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         { throw new ProviderException("Video details are unavailable. The video may be private or restricted."); }
@@ -171,32 +176,48 @@ public sealed class Extractor
         else throw new System.ComponentModel.DataAnnotations.ValidationException("Invalid discovery type.");
         return result;
     }
-    public async Task<CatalogPage> PlaylistVideos(string id, CancellationToken ct)
+    private static int PageOffset(string? page)
+    {
+        if (page is null) return 0;
+        if (int.TryParse(page, out var offset) && offset is > 0 and < 500 && offset % 20 == 0) return offset;
+        throw new System.ComponentModel.DataAnnotations.ValidationException("Invalid video page.");
+    }
+    public async Task<CatalogPage> PlaylistVideos(string id, CancellationToken ct, string? page = null)
     {
         if (!System.Text.RegularExpressions.Regex.IsMatch(id, "^[A-Za-z0-9_-]{10,100}$")) throw new System.ComponentModel.DataAnnotations.ValidationException("Invalid playlist ID.");
         var result = new List<VideoInfo>();
+        var offset = PageOffset(page);
+        var remaining = offset;
         await foreach (var video in _youtube.Playlists.GetVideosAsync(id, ct))
         {
+            if (remaining-- > 0) continue;
             result.Add(new(video.Id, video.Title, video.Author.ChannelTitle, video.Author.ChannelId,
                 "https://i.ytimg.com/vi/" + video.Id + "/hqdefault.jpg", video.Duration?.TotalSeconds));
-            if (result.Count == 50) break;
+            if (result.Count == 21) break;
         }
-        return new(result);
+        return BoundedPage(result, offset);
     }
-    public async Task<CatalogPage> Uploads(string id, CancellationToken ct)
+    private static CatalogPage BoundedPage(List<VideoInfo> items, int offset) =>
+        new(items.Take(20).ToList(), items.Count > 20 && offset + 20 < 500 ? (offset + 20).ToString(System.Globalization.CultureInfo.InvariantCulture) : null);
+
+    public async Task<CatalogPage> Uploads(string id, CancellationToken ct, string? page = null)
     {
         if (!System.Text.RegularExpressions.Regex.IsMatch(id, "^UC[A-Za-z0-9_-]{22}$")) throw new System.ComponentModel.DataAnnotations.ValidationException("Invalid channel ID.");
-        if (_uploads.TryGetValue(id, out var cached) && cached.Expires > DateTimeOffset.UtcNow) return cached.Page;
+        var offset = PageOffset(page);
+        var key = id + ":" + offset;
+        if (_uploads.TryGetValue(key, out var cached) && cached.Expires > DateTimeOffset.UtcNow) return cached.Page;
         var result = new List<VideoInfo>();
+        var remaining = offset;
         await foreach (var video in _youtube.Channels.GetUploadsAsync(id, ct))
         {
+            if (remaining-- > 0) continue;
             result.Add(new(video.Id, video.Title, video.Author.ChannelTitle, video.Author.ChannelId,
                 "https://i.ytimg.com/vi/" + video.Id + "/hqdefault.jpg", video.Duration?.TotalSeconds));
-            if (result.Count == 20) break;
+            if (result.Count == 21) break;
         }
-        var page = new CatalogPage(result);
+        var resultPage = BoundedPage(result, offset);
         if (_uploads.Count >= 100) foreach (var old in _uploads.OrderBy(x => x.Value.Expires).Take(20)) _uploads.TryRemove(old.Key, out _);
-        _uploads[id] = (DateTimeOffset.UtcNow.AddMinutes(15), page); return page;
+        _uploads[key] = (DateTimeOffset.UtcNow.AddMinutes(15), resultPage); return resultPage;
     }
     public async Task Download(VideoInfo video, string directory, int height, JellyfinMuxer muxer, CancellationToken ct, Action<double, string>? report = null)
     {

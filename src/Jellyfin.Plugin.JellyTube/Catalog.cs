@@ -106,7 +106,8 @@ public sealed class Catalog(Store store, Extractor extractor, IHttpClientFactory
             var id = e.GetProperty("id").GetProperty("videoId").GetString()!; Rules.VideoId(id);
             var snippet = e.GetProperty("snippet");
             items.Add(new(id, System.Net.WebUtility.HtmlDecode(Extractor.Text(snippet, "title")), Extractor.Text(snippet, "channelTitle"),
-                Extractor.Text(snippet, "channelId"), "https://i.ytimg.com/vi/" + id + "/hqdefault.jpg", Description: Extractor.Text(snippet, "description")));
+                Extractor.Text(snippet, "channelId"), "https://i.ytimg.com/vi/" + id + "/hqdefault.jpg",
+                PublishedAt: DateTimeOffset.TryParse(Extractor.Text(snippet, "publishedAt"), out var published) ? published : null));
         }
         return new(items, Extractor.Text(doc.RootElement, "nextPageToken", "") is { Length: > 0 } token ? token : null);
     }

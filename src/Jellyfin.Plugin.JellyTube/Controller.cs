@@ -117,12 +117,17 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
     {
         var owner = Owner();
         access.Binding(owner);
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var video = await Video(owner, id, ct);
         var height = store.Settings(owner).MaxHeight;
         if (downloads.PlaybackFile(id, height, store.Get<MediaAsset>(owner, "asset", id)) is null)
             _ = extractor.WarmAdaptive(id, height);
         var asset = await native.Prepare(owner, video, ct);
-        return Ok(new { video = asset.Video, itemId = asset.ItemId, positionTicks = nativeUserData.PlaybackPosition(owner, asset.ItemId), status = "Ready" });
+        var prepareMs = System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+        HttpContext.RequestServices.GetRequiredService<ILogger<JellyTubeController>>()
+            .LogInformation("JellyTube playback preparation {Reference} completed in {PrepareMs:F0} ms.", HttpContext.TraceIdentifier, prepareMs);
+        return Ok(new { video = asset.Video, itemId = asset.ItemId, positionTicks = nativeUserData.PlaybackPosition(owner, asset.ItemId),
+            reference = HttpContext.TraceIdentifier, prepareMs, status = "Ready" });
     }
     [HttpGet("Videos/{id}/Details")]
     public async Task<ActionResult> Details(string id, CancellationToken ct)
@@ -141,9 +146,9 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
         return Ok(new { items = await extractor.Discover(query, kind, ct) });
     }
     [HttpGet("Playlists/{id}/Videos")]
-    public async Task<ActionResult> PlaylistVideos(string id, CancellationToken ct)
+    public async Task<ActionResult> PlaylistVideos(string id, CancellationToken ct, [FromQuery] string? page = null)
     {
-        var owner = Owner(); var result = await extractor.PlaylistVideos(id, ct);
+        var owner = Owner(); var result = await extractor.PlaylistVideos(id, ct, page);
         foreach (var v in result.Items) store.Put(owner, "video", v.Id, v); return Ok(result);
     }
     [HttpGet("Me/Library")]
@@ -174,9 +179,9 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
         if (kind == "Favorites") await nativeUserData.SetFavorite(owner, id, false, ct); return NoContent();
     }
     [HttpGet("Channels/{id}/Uploads")]
-    public async Task<ActionResult> Uploads(string id, CancellationToken ct)
+    public async Task<ActionResult> Uploads(string id, CancellationToken ct, [FromQuery] string? page = null)
     {
-        var owner = Owner(); var result = await extractor.Uploads(id, ct);
+        var owner = Owner(); var result = await extractor.Uploads(id, ct, page);
         foreach (var v in result.Items) store.Put(owner, "video", v.Id, v); return Ok(result);
     }
     [HttpPut("Me/Channels/{id}")]
@@ -296,6 +301,11 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
     {
         Owner(); return Ok(new { extractor = "Managed C# / YoutubeExplode 6.6.3", externalDownloaderRequired = false,
             ffmpeg = muxer.EncoderPath, ffmpegAvailable = System.IO.File.Exists(muxer.EncoderPath), navigation = NavigationMiddleware.Registered || WebTransformation.Registered,
-            storageBytes = downloads.StorageBytes(), libraries = Plugin.Instance.Configuration.Libraries.Count });
+            storageBytes = downloads.StorageBytes(), sharedBytes = downloads.SharedBytes(),
+            mediaUrlConfigured = Uri.TryCreate(Plugin.Instance.Configuration.PublicBaseUrl, UriKind.Absolute, out var mediaUrl)
+                && mediaUrl.Scheme is "http" or "https" && string.IsNullOrEmpty(mediaUrl.UserInfo)
+                && string.IsNullOrEmpty(mediaUrl.Query) && string.IsNullOrEmpty(mediaUrl.Fragment),
+            libraries = Plugin.Instance.Configuration.Libraries.Count,
+            libraryDirectoriesAvailable = Plugin.Instance.Configuration.Libraries.Count(binding => Directory.Exists(binding.Root)) });
     }
 }

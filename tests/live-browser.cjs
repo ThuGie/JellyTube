@@ -31,19 +31,51 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
       await page.getByRole('button', { name: 'Library', exact: true }).click(); await page.locator('.jt-card').first().waitFor();
       await page.screenshot({ path: path.join(live, name + '-library.png') });
       if (name === 'desktop') {
-        await page.locator('.jt-card').first().getByRole('button', { name: '▶ Play', exact: true }).click();
+        const play = page.locator('.jt-card').first().getByRole('button', { name: '▶ Play', exact: true });
+        const details = page.locator('.jt-card').first().getByRole('button', { name: 'Details', exact: true });
+        await details.focus();
+        await page.keyboard.press('Enter');
+        await page.locator('dialog[open]').waitFor();
+        await page.keyboard.press('Escape');
+        await page.locator('dialog[open]').waitFor({ state: 'detached' });
+        assert.equal(await details.evaluate(button => button === document.activeElement), true, 'details restores keyboard focus');
+        let release;
+        const held = new Promise(resolve => { release = resolve; });
+        const preparation = '**/JellyTube/Videos/*/Prepare';
+        await page.route(preparation, async route => {
+          await held;
+          await route.abort().catch(() => {});
+        }, { times: 1 });
+        await play.click();
+        await page.locator('.jt-playback-notice').getByRole('button', { name: 'Cancel' }).click();
+        release();
+        await page.locator('.jt-playback-notice').waitFor({ state: 'detached' });
+        assert.ok(await play.isVisible());
+        checks.push({ check: 'keyboard details and cancelling a stalled playback preparation', passed: true });
+        const started = performance.now();
+        await play.click();
         await page.waitForFunction(() => document.getElementById('jt-app')?.hidden, null, { timeout: 60000 });
         await page.waitForFunction(() => document.querySelector('video') && document.querySelector('video').readyState >= 2, null, { timeout: 60000 }).catch(async error => {
           await page.screenshot({ path: path.join(live, 'native-playback-failure.png') });
           console.log(await page.evaluate(() => ({ hash: location.hash, dialogs: [...document.querySelectorAll('[role=dialog],dialog')].map(d => d.textContent.slice(0, 500)), video: [...document.querySelectorAll('video')].map(v => ({ readyState: v.readyState, error: v.error?.message })), text: document.body.innerText.slice(-900) })));
           throw error;
         });
+        const firstFrameMs = Math.round(performance.now() - started);
         const state = await page.evaluate(() => { const v = document.querySelector('video'); return { readyState: v.readyState, width: v.videoWidth, currentTime: v.currentTime }; });
         assert.ok(state.width > 0); await page.screenshot({ path: path.join(live, name + '-native-player.png') });
         await page.goBack();
         await page.getByRole('heading', { name: 'Your library' }).waitFor();
         assert.ok(await page.locator('#jt-app .jt-card').first().isVisible());
-        checks.push({ check: 'one-click native web playback', passed: true, videoWidth: state.width });
+        checks.push({ check: 'one-click native web playback', passed: true, videoWidth: state.width, firstFrameMs });
+        const warmStarted = performance.now();
+        await play.click();
+        await page.waitForFunction(() => {
+          const video = document.querySelector('video');
+          return document.getElementById('jt-app')?.hidden && video?.readyState >= 2 && !video.paused && video.currentTime > 0;
+        }, null, { timeout: 60000 });
+        checks.push({ check: 'repeat native web playback', passed: true, firstFrameMs: Math.round(performance.now() - warmStarted) });
+        await page.goBack();
+        await page.getByRole('heading', { name: 'Your library' }).waitFor();
       }
       checks.push({ check: name + ' real Jellyfin search, favorites, settings, library and layout', passed: true, pageErrors: errors });
       assert.deepEqual(errors.filter(e => !e.includes('ResizeObserver')), []); await page.close();
