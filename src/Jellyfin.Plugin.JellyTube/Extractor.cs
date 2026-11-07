@@ -54,7 +54,7 @@ public sealed class Extractor
         try
         {
             var started = System.Diagnostics.Stopwatch.GetTimestamp();
-            var manifest = await _youtube.Videos.Streams.GetManifestAsync(id, timeout.Token);
+            var manifest = await ResolveFormats(id, timeout.Token);
             var indexing = System.Diagnostics.Stopwatch.GetTimestamp();
             var video = manifest.GetVideoOnlyStreams().Where(s => s.Container.Name == "mp4" && s.VideoResolution.Height <= height)
                 .OrderByDescending(s => s.VideoCodec.StartsWith("avc", StringComparison.OrdinalIgnoreCase))
@@ -94,6 +94,26 @@ public sealed class Extractor
         catch (Exception ex) when (ex is not (ProviderException or OperationCanceledException))
         { throw new ProviderException("Managed YouTube extraction failed. The video may be restricted or the extractor needs an update."); }
         finally { _slots.Release(); }
+    }
+    private async Task<StreamManifest> ResolveFormats(string id, CancellationToken ct)
+    {
+        using var attempts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var first = _youtube.Videos.Streams.GetManifestAsync(id, attempts.Token).AsTask();
+        var delay = Task.Delay(TimeSpan.FromSeconds(5), attempts.Token);
+        try
+        {
+            if (await Task.WhenAny(first, delay) == first) return await first;
+            ct.ThrowIfCancellationRequested();
+            // A slow upstream request can hold Jellyfin's probe open. Allow one overlapping retry.
+            var second = _youtube.Videos.Streams.GetManifestAsync(id, attempts.Token).AsTask();
+            var winner = await Task.WhenAny(first, second);
+            var other = winner == first ? second : first;
+            _ = other.ContinueWith(task => { _ = task.Exception; }, CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            try { return await winner; }
+            catch (Exception ex) when (ex is not OperationCanceledException && !ct.IsCancellationRequested) { return await other; }
+        }
+        finally { attempts.Cancel(); }
     }
     private async Task<AdaptiveTrack> IndexTrack(string id, string kind, IStreamInfo stream, string codec, int width, int height, CancellationToken ct)
     {
@@ -199,11 +219,21 @@ public sealed class Extractor
                 "https://i.ytimg.com/vi/" + id + "/hqdefault.jpg", video.Duration?.TotalSeconds, video.Description,
                 video.UploadDate, video.Keywords.Take(30).ToArray());
             if (_details.Count >= 256) foreach (var old in _details.OrderBy(entry => entry.Value.Expires).Take(64)) _details.TryRemove(old.Key, out _);
-            _details[id] = (DateTimeOffset.UtcNow.AddMinutes(30), details);
+            _details[id] = (DateTimeOffset.UtcNow.AddHours(6), details);
             return details;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         { throw new ProviderException("Video details are unavailable. The video may be private or restricted."); }
+    }
+    internal CatalogPage WithCachedDates(CatalogPage page)
+    {
+        var now = DateTimeOffset.UtcNow;
+        return page with
+        {
+            Items = page.Items.Select(video => _details.TryGetValue(video.Id, out var cached) && cached.Expires > now
+                ? video with { PublishedAt = video.PublishedAt ?? cached.Video.PublishedAt, DurationSeconds = video.DurationSeconds ?? cached.Video.DurationSeconds }
+                : video).ToList()
+        };
     }
     public async Task<CatalogPage> Search(string query, CancellationToken ct, string? page = null)
     {

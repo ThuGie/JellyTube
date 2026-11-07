@@ -31,6 +31,16 @@ public sealed class NativeLibrary(Store store, Access access, ILibraryManager li
         ? Path.Combine(Plugin.Instance.DataFolderPath, "media") : Path.GetFullPath(Plugin.Instance.Configuration.MediaRoot);
 
     public const string SharedOwner = "shared";
+    public void DisableSharedLibraryWatcher()
+    {
+        if (Plugin.Instance.Configuration.SharedLibrary is not { } shared
+            || !Guid.TryParse(shared.LibraryId, out var id)
+            || library.GetItemById(id) is not CollectionFolder folder) return;
+        var options = library.GetLibraryOptions(folder);
+        if (!options.EnableRealtimeMonitor) return;
+        options.EnableRealtimeMonitor = false;
+        folder.UpdateLibraryOptions(options);
+    }
     public async Task RestoreSharedAccess(IEnumerable<string> owners)
     {
         if (Plugin.Instance.Configuration.SharedLibrary is not { } shared) return;
@@ -62,7 +72,7 @@ public sealed class NativeLibrary(Store store, Access access, ILibraryManager li
                 {
                     await library.AddVirtualFolder(name, null, new LibraryOptions
                     {
-                        PathInfos = [new MediaPathInfo { Path = root }], EnableRealtimeMonitor = true,
+                        PathInfos = [new MediaPathInfo { Path = root }], EnableRealtimeMonitor = false,
                         TypeOptions = new[] { "Movie", "Video", "Folder", "Series" }.Select(type => new TypeOptions
                             { Type = type, MetadataFetchers = [], ImageFetchers = [] }).ToArray(),
                         EnableChapterImageExtraction = false, EnableAutomaticSeriesGrouping = false

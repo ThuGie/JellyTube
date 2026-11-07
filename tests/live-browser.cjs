@@ -91,8 +91,23 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
         await play.waitFor();
         assert.ok(await play.isVisible());
         checks.push({ check: 'keyboard details and cancelling a stalled playback preparation', passed: true });
+        let releaseNegotiation;
+        const delayedNegotiation = new Promise(resolve => { releaseNegotiation = resolve; });
+        await page.route('**/Items/*/PlaybackInfo*', async route => {
+          await delayedNegotiation;
+          await route.continue();
+        }, { times: 1 });
         const started = performance.now();
         await play.click();
+        await page.getByText('Opening Jellyfin player…', { exact: true }).waitFor();
+        await page.evaluate(() => {
+          const now = performance.now.bind(performance);
+          window.restoreJellyTubeTestClock = () => { delete performance.now; };
+          performance.now = () => now() + 95000;
+        });
+        await page.getByText(/Jellyfin is still starting this video/).waitFor();
+        await page.evaluate(() => window.restoreJellyTubeTestClock());
+        releaseNegotiation();
         await page.waitForFunction(() => document.getElementById('jt-app')?.hidden, null, { timeout: 60000 });
         await page.waitForFunction(() => document.querySelector('video') && document.querySelector('video').readyState >= 2, null, { timeout: 60000 }).catch(async error => {
           await page.screenshot({ path: path.join(live, 'native-playback-failure.png') });

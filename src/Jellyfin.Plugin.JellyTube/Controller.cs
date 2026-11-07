@@ -94,7 +94,7 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
     {
         var owner = Owner();
         if (TryVideo(query, out var id)) return Ok(new CatalogPage([await Video(owner, id, ct)]));
-        var result = await catalog.Search(owner, query, page, ct);
+        var result = extractor.WithCachedDates(await catalog.Search(owner, query, page, ct));
         foreach (var video in result.Items) store.Put(owner, "video", video.Id, video);
         // Bound per-user discovery snapshots without touching saved collections.
         var stale = store.List<VideoInfo>(owner, "video"); if (stale.Count > 1000) foreach (var v in stale.Take(stale.Count - 1000)) store.Delete(owner, "video", v.Id);
@@ -150,7 +150,7 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
     [HttpGet("Playlists/{id}/Videos")]
     public async Task<ActionResult> PlaylistVideos(string id, CancellationToken ct, [FromQuery] string? page = null)
     {
-        var owner = Owner(); var result = await extractor.PlaylistVideos(id, ct, page);
+        var owner = Owner(); var result = extractor.WithCachedDates(await extractor.PlaylistVideos(id, ct, page));
         foreach (var v in result.Items) store.Put(owner, "video", v.Id, v); return Ok(result);
     }
     [HttpGet("Me/Library")]
@@ -173,12 +173,12 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
     }
     [HttpGet("Me/Recommendations/Topics")]
     public async Task<ActionResult> TopicRecommendations(CancellationToken ct) =>
-        Ok(await catalog.RecommendTopics(Owner(), ct));
+        Ok(extractor.WithCachedDates(await catalog.RecommendTopics(Owner(), ct)));
     [HttpGet("Explore")]
     public async Task<ActionResult> Explore([FromQuery] string topic, [FromQuery] string? page, CancellationToken ct)
     {
         var owner = Owner();
-        var result = await catalog.Explore(owner, topic, page, ct);
+        var result = extractor.WithCachedDates(await catalog.Explore(owner, topic, page, ct));
         foreach (var video in result.Items) store.Put(owner, "video", video.Id, video);
         return Ok(result);
     }
@@ -191,7 +191,7 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
     [HttpGet("Channels/{id}/Uploads")]
     public async Task<ActionResult> Uploads(string id, CancellationToken ct, [FromQuery] string? page = null)
     {
-        var owner = Owner(); var result = await extractor.Uploads(id, ct, page);
+        var owner = Owner(); var result = extractor.WithCachedDates(await extractor.Uploads(id, ct, page));
         foreach (var v in result.Items) store.Put(owner, "video", v.Id, v); return Ok(result);
     }
     [HttpPut("Me/Channels/{id}")]

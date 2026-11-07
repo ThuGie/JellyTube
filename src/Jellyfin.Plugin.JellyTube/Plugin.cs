@@ -44,6 +44,7 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
         services.AddSingleton<Catalog>(); services.AddSingleton<Access>(); services.AddSingleton<NativeLibrary>();
         services.AddSingleton<NativeUserData>();
         services.AddSingleton<SegmentCache>();
+        services.AddSingleton<ThumbnailCache>();
         services.AddSingleton<LibraryPrivacy>();
         services.AddSingleton<MediaBrowser.Controller.Events.IEventConsumer<Jellyfin.Data.Events.Users.UserCreatedEventArgs>, UserCreatedConsumer>();
         services.AddScoped<LibraryPrivacyFilter>();
@@ -73,10 +74,12 @@ public static class WebTransformation
         return Registered = true;
     }
 }
-public sealed class InjectionService(ILogger<InjectionService> logger) : BackgroundService
+public sealed class InjectionService(ILogger<InjectionService> logger, NativeLibrary native) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        try { native.DisableSharedLibraryWatcher(); }
+        catch (Exception ex) { logger.LogWarning("JellyTube could not disable its library watcher ({ErrorType}).", ex.GetType().Name); }
         for (var i = 0; i < 30; i++)
         {
             try { if (NavigationMiddleware.Registered || WebTransformation.Register()) return; }

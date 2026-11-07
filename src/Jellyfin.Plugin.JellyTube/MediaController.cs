@@ -10,11 +10,23 @@ namespace Jellyfin.Plugin.JellyTube;
 
 /// <summary>Capability-bound media transport for Jellyfin/FFmpeg/native clients, including byte-range seeking.</summary>
 [ApiController, Route("JellyTube/Media/{owner}/{id}/{secret}"), AllowAnonymous, JellyTubeErrors]
-public sealed class MediaController(Store store, NativeLibrary native, Extractor extractor, IHttpClientFactory http, SegmentCache cache, Downloads downloads,
+public sealed class MediaController(Store store, NativeLibrary native, Extractor extractor, IHttpClientFactory http, SegmentCache cache, Downloads downloads, ThumbnailCache thumbnails,
     Microsoft.Extensions.Logging.ILogger<MediaController> logger) : ControllerBase
 {
     internal const int SharedStreamHeight = 720;
     private int Height(string owner) => owner == NativeLibrary.SharedOwner ? SharedStreamHeight : store.Settings(owner).MaxHeight;
+    [HttpGet("~/JellyTube/Thumbnails/{id}.jpg")]
+    public async Task<ActionResult> Thumbnail(string id, CancellationToken ct)
+    {
+        var bytes = await thumbnails.Get(id, ct);
+        if (bytes is null)
+        {
+            Response.Headers.CacheControl = "no-store";
+            return NotFound();
+        }
+        Response.Headers.CacheControl = "public, max-age=21600";
+        return File(bytes, "image/jpeg");
+    }
     [HttpGet("manifest.mpd"), HttpHead("manifest.mpd")]
     public async Task<ActionResult> Manifest(string owner, string id, string secret, CancellationToken ct)
     {

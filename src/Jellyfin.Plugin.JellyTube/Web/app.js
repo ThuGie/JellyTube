@@ -98,13 +98,15 @@
     // Allow Jellyfin's element-upgrade observer to attach its native item-action listeners.
     await new Promise(resolve => setTimeout(resolve, 0));
     if (account() !== expectedScope || generation !== expectedGeneration) { host.remove(); return; }
+    const existingVideo = document.querySelector('video');
+    const existingSource = existingVideo?.currentSrc;
     const event = new MouseEvent('click', { bubbles: true, cancelable: true }); action.dispatchEvent(event); host.remove();
     if (queue) return;
     if (!event.defaultPrevented) throw new Error('Jellyfin’s player is unavailable. Refresh Jellyfin Web and try again.');
     if (playbackReturn) return;
     const pending = {
       page: root, scope: expectedScope, entered: false, attempt,
-      scroll: root.scrollTop, focus: document.activeElement, retried: false
+      scroll: root.scrollTop, focus: document.activeElement, retried: false, existingVideo, existingSource
     };
     playbackReturn = pending;
     pending.notice = playbackNotice('Opening Jellyfin player…', () => {
@@ -122,13 +124,21 @@
     return notice;
   }
   const isPlayerRoute = () => /^#\/video(?:[/?]|$)/.test(location.hash);
+  function activeNativeVideo(pending) {
+    return [...document.querySelectorAll('video')].find(video => video.currentSrc && !video.paused && !video.ended
+      && (video !== pending.existingVideo || video.currentSrc !== pending.existingSource)
+      && video.getClientRects().length > 0);
+  }
   function leavePlayback(pending, error) {
     if (pending.entered && isPlayerRoute()) {
       pending.returnError = error;
       pending.notice?.remove();
       clearInterval(pending.interval);
       history.back();
-    } else finishPlayback(pending, error);
+    } else {
+      activeNativeVideo(pending)?.pause();
+      finishPlayback(pending, error);
+    }
   }
   function finishPlayback(pending, error) {
     if (playbackReturn !== pending) return;
@@ -148,7 +158,7 @@
     updatePlaybackPage();
     if (playbackReturn !== pending) return;
     const { attempt } = pending;
-    const player = pending.entered ? document.querySelector('video') : null;
+    const player = pending.entered ? activeNativeVideo(pending) || document.querySelector('video') : null;
     if (player && player.readyState >= 2 && !player.paused && player.currentTime > 0 && !player.error) {
       const negotiation = performance.getEntriesByType('resource').filter(entry =>
         entry.startTime >= attempt.started && /\/PlaybackInfo(?:[?#]|$)/i.test(entry.name)).at(-1);
@@ -166,23 +176,29 @@
       pending.notice.firstChild.textContent = 'The stream was interrupted. Retrying…';
       nativePlay([attempt.itemId], attempt.positionTicks || 0, false, pending.scope).catch(() => {});
     }
-    if (performance.now() - attempt.started > 75000 || (player?.error && player.error.code !== 2)
+    const elapsed = performance.now() - attempt.started;
+    if (elapsed > 180000 || (player?.error && player.error.code !== 2)
         || (player?.error && pending.retried && performance.now() - pending.retryAt > 8000)) {
       const reason = player?.error ? 'Jellyfin reported a video playback error.' : 'Jellyfin did not start playback before the timeout.';
       leavePlayback(pending, `${reason} Reference ${attempt.reference || 'unavailable'}.`);
-    } else if (!pending.retried && performance.now() - attempt.started > 15000) {
-      pending.notice.firstChild.textContent = 'Still waiting for the first video frame…';
+    } else if (!pending.retried && elapsed > 15000) {
+      pending.notice.firstChild.textContent = elapsed > 75000
+        ? `Jellyfin is still starting this video. Reference ${attempt.reference || 'unavailable'}.`
+        : 'Still waiting for the first video frame…';
     }
   }
   function updatePlaybackPage() {
     const pending = playbackReturn;
     if (!pending || pending.scope !== account() || pending.page !== root) return;
-    if (isPlayerRoute() && !pending.entered) {
+    const playerOpen = isPlayerRoute() || !!activeNativeVideo(pending);
+    if (playerOpen && !pending.entered) {
       pending.entered = true;
       root.hidden = true;
       document.body.classList.remove('jt-open');
-    } else if (!isPlayerRoute() && pending.entered) {
-      setTimeout(() => { if (!isPlayerRoute()) finishPlayback(pending, pending.returnError); }, 0);
+    } else if (!playerOpen && pending.entered) {
+      setTimeout(() => {
+        if (!isPlayerRoute() && !activeNativeVideo(pending)) finishPlayback(pending, pending.returnError);
+      }, 0);
     }
   }
   const cardDetails = new Map();
@@ -217,10 +233,12 @@
     cardDetails.set(id, result);
     return result;
   }
-  function card(video, sequence = [video], onMetadata) {
+  function card(video, sequence = [video]) {
     const c = el('article', 'jt-card'), img = el('img', 'jt-image'); img.alt = ''; img.loading = 'lazy'; img.referrerPolicy = 'no-referrer';
     // Images are derived from a validated provider ID, never arbitrary stored HTML/URLs.
-    img.src = `https://i.ytimg.com/vi/${encodeURIComponent(video.id)}/hqdefault.jpg`;
+    const thumbnailId = encodeURIComponent(video.id);
+    img.onerror = () => { img.onerror = null; img.src = `https://i.ytimg.com/vi/${thumbnailId}/hqdefault.jpg`; };
+    img.src = ApiClient.getUrl(`JellyTube/Thumbnails/${thumbnailId}.jpg`);
     const body = el('div', 'jt-cardbody'), actions = el('div', 'jt-actions');
     body.append(el('div', 'jt-title', video.title), el('div', 'jt-byline', video.channel));
     actions.append(button('▶ Play', () => play(video, sequence), 'jt-primary'), button(saved('favorites', video.id) ? '★ Favorited' : '☆ Favorite', b => toggleSave(video, 'favorites', b)), button(saved('watchLater', video.id) ? '✓ Watch later' : '+ Watch later', b => toggleSave(video, 'watchLater', b)), button('Playlist', () => addToPlaylist(video)));
@@ -243,7 +261,6 @@
         video.description ??= details.description;
         video.tags ??= details.tags;
         showMetadata(details);
-        onMetadata?.();
       };
       detailObserver.observe(info);
     }
@@ -519,7 +536,7 @@
     ['technology', 'Technology'], ['science', 'Science & nature'], ['music', 'Music'],
     ['gaming', 'Gaming'], ['food', 'Food'], ['travel', 'Travel'], ['sports', 'Sports']
   ];
-  const dailyTopic = () => exploreTopics[Math.floor(Date.now() / 86400000) % exploreTopics.length][0];
+  const dailyTopic = (offset = 0) => exploreTopics[(Math.floor(Date.now() / 86400000) + offset) % exploreTopics.length][0];
   let homeFeed = 'for-you', homeFormat = 'videos', exploreTopic;
   const homeSort = new Map();
   async function renderHome() {
@@ -550,7 +567,8 @@
     const pageStatus = status;
     const pages = new Map();
     function cachedPage(path) {
-      if (!pages.has(path)) pages.set(path, api(path).catch(error => { pages.delete(path); throw error; }));
+      if (!pages.has(path)) pages.set(path, api(path, 'GET', undefined, AbortSignal.timeout(16000))
+        .catch(error => { pages.delete(path); throw error; }));
       return pages.get(path);
     }
     const history = session.settings.recordHistory ? library.history : [];
@@ -597,16 +615,26 @@
       feed.replaceChildren(loading);
       const paths = kind === 'explore' ? [explorePath(topic)] : kind === 'following'
         ? followed.map(channelPath)
-        : ['Me/Recommendations/Topics', explorePath(dailyTopic()), ...[...new Set([...followed, ...watchedChannels])].map(channelPath)];
-      const results = await Promise.allSettled(paths.map(cachedPage));
+        : ['Me/Recommendations/Topics', explorePath(dailyTopic()), explorePath(dailyTopic(3)),
+          ...[...new Set([...followed, ...watchedChannels])].map(channelPath)];
+      const ready = new Map();
+      let firstUsable;
+      const usable = new Promise(resolve => { firstUsable = resolve; });
+      let waiting = true;
+      const all = Promise.allSettled(paths.map(async path => {
+        const page = await cachedPage(path);
+        ready.set(path, { path, items: page.items, next: page.nextPageToken });
+        if (page.items.some(video => !!isShortVideo(video) === (homeFormat === 'shorts'))) firstUsable();
+      })).then(() => { waiting = false; });
+      if (kind === 'for-you')
+        await Promise.race([all, usable.then(() => new Promise(resolve => setTimeout(resolve, 650)))]);
+      else await all;
       if (!isCurrent()) return;
-      const sources = results.flatMap((result, index) => result.status === 'fulfilled'
-        ? [{ path: paths[index], items: result.value.items, next: result.value.nextPageToken }] : []);
+      const sources = paths.filter(path => ready.has(path)).map(path => ready.get(path));
       const videos = [], feedOrder = [], seen = new Set(kind === 'for-you' ? watched : []);
       const deferred = [];
       const cards = el('div', 'jt-grid');
       const nodes = new Map();
-      let rerank;
       const reorder = () => {
         if (!isCurrent()) return;
         const ordered = sortedVideos(feedOrder, sort[1].value);
@@ -622,6 +650,10 @@
       };
       reorderFeed = reorder;
       const more = button('Load more', async () => {
+        if (waiting) await all;
+        if (!isCurrent()) return;
+        const existing = new Set(sources.map(source => source.path));
+        sources.push(...paths.filter(path => ready.has(path) && !existing.has(path)).map(path => ready.get(path)));
         if (candidates().length < 24) {
           const pageable = sources.filter(source => source.next).slice(0, 4);
           const nextPages = await Promise.allSettled(pageable.map(source =>
@@ -666,26 +698,21 @@
           if (++added === 24) break;
         }
         if (added < 12) for (const video of deferred.slice(0, 12 - added)) add(video);
-        reorder();
-        more.hidden = !candidates().length && !sources.some(source => source.next);
+        more.hidden = !waiting && sources.length === ready.size && !candidates().length && !sources.some(source => source.next);
         if (videos.length) feed.querySelector('.jt-empty')?.remove();
       }
       function add(video) {
         seen.add(video.id);
         videos.push(video);
         feedOrder.push(video);
-        const node = card(video, videos, () => {
-          if (!['newest', 'oldest'].includes(sort[1].value)) return;
-          clearTimeout(rerank);
-          rerank = setTimeout(reorder, 250);
-        });
+        const node = card(video, videos);
         nodes.set(video.id, node);
         cards.append(node);
       }
       feed.replaceChildren(cards, more);
       append();
       if (!videos.length) {
-        feed.prepend(el('p', 'jt-empty', results.length && !sources.length
+        feed.prepend(el('p', 'jt-empty', paths.length && !sources.length
           ? 'This feed is temporarily unavailable.'
           : kind === 'following' && !followed.length ? 'Follow a channel to see uploads here.'
           : kind === 'explore' ? 'No relevant videos match this topic and format on this page.' : 'No videos match this format yet.'));
@@ -784,6 +811,7 @@
     if (!root) return;
     preparing?.abort('cancelled');
     if (playbackReturn && !playbackReturn.entered) finishPlayback(playbackReturn);
+    if (next === 'home' && push) homeFeed = 'for-you';
     clearTimeout(timer); generation++; tab = next; main.replaceChildren();
     const version = generation;
     status = el('div', 'jt-status'); status.setAttribute('role', 'status'); main.append(status);
@@ -813,6 +841,7 @@
   }
   function close(back = true) { generation++; clearTimeout(timer); preparing?.abort("cancelled"); if (playbackReturn) finishPlayback(playbackReturn); root?.remove(); root = main = status = null; document.body.classList.remove('jt-open'); if (back && history.state?.jellyTube) history.back(); lastFocus?.focus(); }
   async function open(next = 'home', host) {
+    if (next === 'home') homeFeed = 'for-you';
     if (typeof ApiClient === 'undefined' || !ApiClient.accessToken()) return;
     if (root) close(false); lastFocus = document.activeElement;
     session = await api('Session'); root = el('section', host ? 'jt-embedded' : ''); root.id = 'jt-app'; root.setAttribute('aria-label', 'JellyTube'); document.body.classList.add('jt-open');
