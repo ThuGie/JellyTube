@@ -9,6 +9,15 @@
     "imageUrl": "https://raw.githubusercontent.com/ThuGie/JellyTube/main/assets/jellytube.png",
     "versions": [
       {
+        "version": "0.1.0.2",
+        "changelog": "- Keep the JellyTube page in place during native playback and restore it when the player closes.\n- Coordinate video registration with Jellyfin's file watcher and include server log references for unexpected playback errors.\n- Fetch audio and video indexes in parallel during streaming startup.\n- Recommend unwatched uploads from followed and recently watched channels on Home. When history is enabled, use tags from recent watches to discover videos across channels.",
+        "targetAbi": "10.11.3.0",
+        "sourceUrl": "https://github.com/ThuGie/JellyTube/releases/download/v0.1.0.2/JellyTube_0.1.0.2.zip",
+        "checksum": "1aa0110b804702695b610f7cc05275e0",
+        "timestamp": "2026-11-07T11:11:40Z",
+        "dependencies": []
+      },
+      {
         "version": "0.1.0.1",
         "changelog": "- Register native playback items directly when Play is pressed. Streaming and retained downloads no longer wait for library indexing, including videos whose stream files already exist.",
         "targetAbi": "10.11.3.0",
