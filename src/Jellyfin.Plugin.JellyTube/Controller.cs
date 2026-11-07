@@ -52,6 +52,7 @@ public sealed class JellyTubeJson : ResultFilterAttribute
 }
 public sealed record NameRequest(string Name);
 public sealed record ProgressRequest(double PositionSeconds);
+public sealed record DirectProgressRequest(double PositionSeconds, bool Completed = false);
 public sealed record AdminSettings(string PublicBaseUrl, string MediaRoot, long StorageBudgetMb, bool EnableDownloads,
     int SearchCallsPerDay, int UserSearchCallsPerDay, string[] DeniedUsers, string? ApiKey = null, string[]? DownloadDeniedUsers = null, string MinimumSafeSearch = "moderate");
 
@@ -75,6 +76,7 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
     public ActionResult Asset(string name) => name switch
     {
         "app.js" => Content(Plugin.Resource("app.js"), "application/javascript"),
+        "dash.js" => Content(Plugin.Resource("dash.js"), "application/javascript"),
         "app.css" => Content(Plugin.Resource("app.css"), "text/css"), _ => NotFound()
     };
     [HttpGet("Session")]
@@ -121,7 +123,7 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         Rules.VideoId(id);
         var height = Plugin.Instance.Configuration.SharedLibrary is null ? store.Settings(owner).MaxHeight : MediaController.SharedStreamHeight;
-        if (warm && downloads.PlaybackFile(id, height, store.Get<MediaAsset>(owner, "asset", id)) is null)
+        if (warm && downloads.PlaybackFile(id, height, store.Get<MediaAsset>(owner, "asset", id), minimumHeight: height) is null)
             _ = extractor.WarmAdaptive(id, height);
         var video = await Video(owner, id, ct);
         var asset = await native.Prepare(owner, video, ct);
@@ -129,7 +131,18 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
         HttpContext.RequestServices.GetRequiredService<ILogger<JellyTubeController>>()
             .LogInformation("JellyTube playback preparation {Reference} completed in {PrepareMs:F0} ms.", HttpContext.TraceIdentifier, prepareMs);
         return Ok(new { video = asset.Video, itemId = asset.ItemId, positionTicks = nativeUserData.PlaybackPosition(owner, asset.ItemId),
-            reference = HttpContext.TraceIdentifier, prepareMs, status = "Ready" });
+            reference = HttpContext.TraceIdentifier, prepareMs, status = "Ready",
+            directSource = $"JellyTube/Media/{asset.Owner}/{asset.Id}/{asset.Secret}/source" });
+    }
+    [HttpPut("Videos/{id}/Progress")]
+    public ActionResult SaveDirectProgress(string id, [FromBody] DirectProgressRequest request, CancellationToken ct)
+    {
+        var owner = Owner();
+        access.Binding(owner);
+        if (!double.IsFinite(request.PositionSeconds) || request.PositionSeconds is < 0 or > 86400)
+            throw new ValidationException("Invalid playback position.");
+        nativeUserData.SaveProgress(owner, Rules.VideoId(id), request, ct);
+        return NoContent();
     }
     [HttpGet("Videos/{id}/Details")]
     public async Task<ActionResult> Details(string id, CancellationToken ct)

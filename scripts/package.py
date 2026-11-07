@@ -1,5 +1,6 @@
 """Build a portable, versioned plugin archive. Development tool only, never a NAS dependency."""
 import argparse, datetime, hashlib, json, os, pathlib, re, subprocess, time, zipfile
+from catalog import notes
 
 root = pathlib.Path(__file__).resolve().parents[1]
 p = argparse.ArgumentParser()
@@ -15,7 +16,7 @@ if not epoch:
     r=subprocess.run(['git','log','-1','--format=%ct'],cwd=root,capture_output=True,text=True)
     epoch=r.stdout.strip() if r.returncode==0 else str(int(time.time()))
 timestamp=datetime.datetime.fromtimestamp(int(epoch),datetime.timezone.utc)
-meta=json.loads((root/'meta.json').read_text());meta.update(version=version,status='Active',timestamp=timestamp.isoformat().replace('+00:00','Z'),imageUrl='https://raw.githubusercontent.com/'+a.repository+'/main/assets/jellytube.png')
+meta=json.loads((root/'meta.json').read_text());meta.update(version=version,changelog=notes(version),status='Active',timestamp=timestamp.isoformat().replace('+00:00','Z'),imageUrl='https://raw.githubusercontent.com/'+a.repository+'/main/assets/jellytube.png')
 files=meta['assemblies'];build=root/'src/Jellyfin.Plugin.JellyTube/bin/Release/net9.0'
 out=root/'artifacts/releases';out.mkdir(parents=True,exist_ok=True);archive=out/('JellyTube_'+version+'.zip')
 def add(z,name,data):
@@ -24,7 +25,7 @@ def add(z,name,data):
 with zipfile.ZipFile(archive,'w') as z:
     for name in files:add(z,name,(build/name).read_bytes())
     add(z,'meta.json',(json.dumps(meta,indent=2)+'\n').encode())
-    for name in ['README.md','THIRD-PARTY-NOTICES.md','LICENSE','thumb.png']:
+    for name in ['README.md','CHANGELOG.md','THIRD-PARTY-NOTICES.md','LICENSE','thumb.png']:
         if (root/name).exists():add(z,name,(root/name).read_bytes())
     for folder in ['licenses','docs']:
         for source in sorted((root/folder).glob('*')):

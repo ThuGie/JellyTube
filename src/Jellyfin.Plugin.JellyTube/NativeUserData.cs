@@ -11,6 +11,19 @@ public sealed class NativeUserData(Store store, Access access, ILibraryManager l
             ? userData.GetUserData(access.User(owner), item)?.PlaybackPositionTicks ?? 0
             : 0;
 
+    public void SaveProgress(string owner, string videoId, DirectProgressRequest progress, CancellationToken ct)
+    {
+        var asset = store.Get<MediaAsset>(owner, "asset", videoId);
+        var user = access.User(owner);
+        if (!Guid.TryParse(asset?.ItemId, out var id) || library.GetItemById(id) is not { } item || !item.IsVisible(user))
+            throw new KeyNotFoundException("The prepared video is unavailable.");
+        var data = userData.GetUserData(user, item) ?? throw new InvalidOperationException("Playback state is unavailable.");
+        data.PlaybackPositionTicks = progress.Completed ? 0 : TimeSpan.FromSeconds(progress.PositionSeconds).Ticks;
+        data.LastPlayedDate = DateTime.UtcNow;
+        if (progress.Completed) { data.Played = true; data.PlayCount++; }
+        userData.SaveUserData(user, item, data, UserDataSaveReason.UpdateUserData, ct);
+    }
+
     public Task SetFavorite(string owner, string id, bool favorite, CancellationToken ct)
     {
         var asset = store.Get<MediaAsset>(owner, "asset", id); var item = asset is null ? null : library.FindByPath(Path.Combine(asset.Directory, "video.strm"), false);

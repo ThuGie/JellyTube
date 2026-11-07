@@ -47,7 +47,7 @@ YouTube API credentials are optional. Managed discovery supports video, channel 
 
 Native clients use the shared JellyTube library and its native player. Custom YouTube discovery screens are provided by the web integration; a server plugin cannot add arbitrary search screens to every TV/mobile app. Browsers were tested at desktop and mobile sizes. A mobile browser test is not a physical Android/iOS or TV-app certification.
 
-Shared playback uses a 720p cap. The per-user maximum resolution applies to downloads. Format selection prefers H.264/AAC to avoid unnecessary video transcoding on a NAS; a lower compatible resolution may be selected. Jellyfin applies the device profile and the user's normal transcode/remux permissions. The web queue preference queues up to 20 subsequent videos from the displayed list for the local player; native apps retain their own queue controls.
+Shared playback defaults to a 1080p cap and selects resolution before frame rate. The per-user maximum resolution applies to downloads. JellyTube plays supported streams directly in Jellyfin Web and saves progress to the user's Jellyfin account. **Play in Jellyfin** opens the native player, which applies the device profile and the user's normal transcode/remux permissions. Native apps retain their own queue controls.
 
 Public on-demand videos are the initial scope. Private, age/region-restricted, live/DVR, DRM and verification-required videos may be unavailable. Personal Google cookies are not imported. YouTube can change extraction behavior; fixes ship as a plugin/dependency update, not a new NAS command-line requirement.
 

@@ -58,3 +58,22 @@ body.jt-open > .docspinner { display:none !important; }
     font-size: .875rem;
     margin: .4em 0 0;
 }
+
+#jt-app .jt-direct-player {
+    color: var(--jt-text);
+    background: var(--jt-panel);
+    border: 1px solid var(--jt-line);
+    border-radius: 12px;
+    width: min(70rem, calc(100vw - 24px));
+    max-height: calc(100vh - 24px);
+    padding: 16px;
+}
+#jt-app .jt-direct-player::backdrop { background: #000e; }
+#jt-app .jt-direct-player video {
+    display: block;
+    width: 100%;
+    max-height: 70vh;
+    aspect-ratio: 16 / 9;
+    background: #000;
+}
+#jt-app .jt-direct-player button { margin-inline-end: 8px; }

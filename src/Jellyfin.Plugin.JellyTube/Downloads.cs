@@ -14,21 +14,22 @@ public sealed class Downloads(Store store, Extractor extractor, JellyfinMuxer mu
     private string SharedPath(string id, int height) =>
         Rules.Inside(native.MediaRoot, $".shared/{Rules.VideoId(id)}-{height}.mp4");
 
-    public string? PlaybackFile(string id, int height, MediaAsset? asset)
+    public string? PlaybackFile(string id, int height, MediaAsset? asset, int minimumHeight = 0)
     {
-        if (asset?.LocalFile is { } local && File.Exists(local)) return local;
+        if (asset?.LocalFile is { } local && File.Exists(local)
+            && (minimumHeight == 0 || store.Get<DownloadJob>(asset.Owner, "download", id)?.MaxHeight >= minimumHeight)) return local;
         var shared = SharedPath(id, height);
         if (File.Exists(shared)) return shared;
-        if (asset?.Owner != NativeLibrary.SharedOwner) return null;
+        if (asset?.Owner != NativeLibrary.SharedOwner || minimumHeight >= height) return null;
         return new[] { 2160, 1440, 1080, 720, 480, 360 }.Where(quality => quality <= height)
             .Select(quality => SharedPath(id, quality)).FirstOrDefault(File.Exists);
     }
 
-    public Stream? OpenPlayback(string id, int height, MediaAsset asset, Microsoft.AspNetCore.Http.HttpResponse response)
+    public Stream? OpenPlayback(string id, int height, MediaAsset asset, Microsoft.AspNetCore.Http.HttpResponse response, int minimumHeight = 0)
     {
         lock (_gate)
         {
-            var path = PlaybackFile(id, height, asset);
+            var path = PlaybackFile(id, height, asset, minimumHeight);
             if (path is null || _pendingDeletion.Contains(path)) return null;
             var stream = File.OpenRead(path);
             _readers[path] = _readers.GetValueOrDefault(path) + 1;

@@ -13,7 +13,7 @@ namespace Jellyfin.Plugin.JellyTube;
 public sealed class MediaController(Store store, NativeLibrary native, Extractor extractor, IHttpClientFactory http, SegmentCache cache, Downloads downloads, ThumbnailCache thumbnails,
     Microsoft.Extensions.Logging.ILogger<MediaController> logger) : ControllerBase
 {
-    internal const int SharedStreamHeight = 720;
+    internal const int SharedStreamHeight = 1080;
     private int Height(string owner) => owner == NativeLibrary.SharedOwner ? SharedStreamHeight : store.Settings(owner).MaxHeight;
     [HttpGet("~/JellyTube/Thumbnails/{id}.jpg")]
     public async Task<ActionResult> Thumbnail(string id, CancellationToken ct)
@@ -28,16 +28,16 @@ public sealed class MediaController(Store store, NativeLibrary native, Extractor
         return File(bytes, "image/jpeg");
     }
     [HttpGet("manifest.mpd"), HttpHead("manifest.mpd")]
-    public async Task<ActionResult> Manifest(string owner, string id, string secret, CancellationToken ct)
+    public async Task<ActionResult> Manifest(string owner, string id, string secret, CancellationToken ct, [FromQuery] bool web = false)
     {
         var asset = native.Resolve(owner, id, secret);
         Response.Headers.CacheControl = "private, no-store";
         var height = Height(owner);
-        if (downloads.PlaybackFile(id, height, asset) is not null)
+        if (!web && downloads.PlaybackFile(id, height, asset) is not null)
             return Redirect(Plugin.Instance.Configuration.PublicBaseUrl.TrimEnd('/') + "/JellyTube/Media/" + owner + "/" + id + "/" + secret + "/local.mp4");
         var seconds = asset.Video.DurationSeconds;
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
-        var prefix = Plugin.Instance.Configuration.PublicBaseUrl.TrimEnd('/') + "/JellyTube/Media/" + owner + "/" + id + "/" + secret + "/";
+        var prefix = web ? "./" : Plugin.Instance.Configuration.PublicBaseUrl.TrimEnd('/') + "/JellyTube/Media/" + owner + "/" + id + "/" + secret + "/";
         var source = await extractor.ResolvePlayback(id, height, ct);
         if (source.Progressive is { } progressive)
             return Redirect(prefix + "progressive.mp4?identity=" + progressive.Identity);
@@ -45,10 +45,23 @@ public sealed class MediaController(Store store, NativeLibrary native, Extractor
         if (seconds is null or <= 0) throw new ProviderException("Live or unknown-duration videos are not supported in this preview.");
         logger.LogInformation("JellyTube media request {Reference} prepared the streaming manifest in {ResolutionMs:F0} ms.",
             HttpContext.TraceIdentifier, System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds);
-        var xml = ManifestXml(source.Adaptive!, seconds.Value, prefix, height);
+        var xml = ManifestXml(source.Adaptive!, seconds.Value, prefix, height, web);
         return Content(xml, "application/dash+xml");
     }
-    internal static string ManifestXml(AdaptiveSource source, double seconds, string prefix, int height = 720)
+    [HttpGet("source")]
+    public async Task<ActionResult> DirectSource(string owner, string id, string secret, CancellationToken ct)
+    {
+        var asset = native.Resolve(owner, id, secret);
+        var height = Height(owner);
+        Response.Headers.CacheControl = "private, no-store";
+        if (downloads.PlaybackFile(id, height, asset, minimumHeight: height) is not null)
+            return new JsonResult(new { mode = "mp4", file = "local.mp4?fullQuality=true" });
+        var source = await extractor.ResolvePlayback(id, height, ct);
+        if (source.Progressive is { } progressive)
+            return new JsonResult(new { mode = "mp4", file = "progressive.mp4?identity=" + progressive.Identity, height = progressive.Height });
+        return new JsonResult(new { mode = "dash", file = "manifest.mpd?web=true", height = source.Adaptive!.Video.Height });
+    }
+    internal static string ManifestXml(AdaptiveSource source, double seconds, string prefix, int height = 720, bool web = false)
     {
         XNamespace ns = "urn:mpeg:dash:schema:mpd:2011";
         string TrackUrl(AdaptiveTrack track, string kind) => prefix + kind + ".mp4?height=" + height + "&identity=" + Fingerprint(track);
@@ -70,15 +83,16 @@ public sealed class MediaController(Store store, NativeLibrary native, Extractor
                 new XElement(ns + "BaseURL", TrackUrl(track, kind)),
                 Segments(track, kind)));
         return new XDocument(new XElement(ns + "MPD", new XAttribute("type", "static"), new XAttribute("profiles", "urn:mpeg:dash:profile:isoff-on-demand:2011"),
-            new XAttribute("minBufferTime", "PT3S"), new XAttribute("mediaPresentationDuration", XmlConvert.ToString(TimeSpan.FromSeconds(seconds))),
+            new XAttribute("minBufferTime", web ? "PT1S" : "PT3S"), new XAttribute("mediaPresentationDuration", XmlConvert.ToString(TimeSpan.FromSeconds(seconds))),
             new XElement(ns + "Period", new XAttribute("start", "PT0S"), Adaptation(source.Video, "video"), Adaptation(source.Audio, "audio")))).ToString();
     }
     internal static string Fingerprint(AdaptiveTrack track) => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes($"{track.Codec}|{track.Size}|{track.Width}|{track.Height}|{track.IndexEnd}|{track.IndexIdentity}")))[..24].ToLowerInvariant();
     [HttpGet("local.mp4"), HttpHead("local.mp4")]
-    public ActionResult Local(string owner, string id, string secret)
+    public ActionResult Local(string owner, string id, string secret, [FromQuery] bool fullQuality = false)
     {
         var asset = native.Resolve(owner, id, secret);
-        var local = downloads.OpenPlayback(id, Height(owner), asset, Response);
+        var height = Height(owner);
+        var local = downloads.OpenPlayback(id, height, asset, Response, fullQuality ? height : 0);
         if (local is null) return NotFound();
         Response.Headers.CacheControl = "private, no-store";
         return File(local, "video/mp4", enableRangeProcessing: true);

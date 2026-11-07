@@ -1,5 +1,5 @@
 """Generate/merge Jellyfin catalog metadata from the actual published archive."""
-import argparse, datetime, hashlib, json, os, pathlib, re, zipfile
+import argparse, datetime, hashlib, json, os, pathlib, re, subprocess, zipfile
 
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 GUID='241ac687-789b-4499-8ba1-9fb16602b421'
@@ -7,10 +7,19 @@ def version(value):
     if not re.fullmatch(r'\d+\.\d+\.\d+\.\d+',value) or any(int(n)>65535 for n in value.split('.')): raise ValueError('Use a four-part numeric assembly version.')
     return value
 def key(value): return tuple(map(int,value.split('.')))
-def notes(value):
+def written_notes(value):
     text=(ROOT/'CHANGELOG.md').read_text(encoding='utf-8')
     match=re.search(r'^## '+re.escape(value)+r'\s*\n(.*?)(?=^## |\Z)',text,re.M|re.S)
-    return match.group(1).strip() if match else 'Release '+value
+    return match.group(1).strip() if match else ''
+def notes(value):
+    if written := written_notes(value): return written
+    tags = subprocess.run(['git','tag','--merged','HEAD','--list','v*'],cwd=ROOT,capture_output=True,text=True).stdout.splitlines()
+    previous = max((tag for tag in tags if re.fullmatch(r'v\d+\.\d+\.\d+\.\d+',tag) and key(tag[1:])<key(value)),
+                   key=lambda tag:key(tag[1:]),default=None)
+    revision = previous+'..HEAD' if previous else 'HEAD'
+    log = subprocess.run(['git','log','--no-merges','--format=%s',revision],cwd=ROOT,capture_output=True,text=True).stdout
+    subjects = [line.strip() for line in log.splitlines() if line.strip() and not line.startswith('chore: publish Jellyfin catalog')]
+    return '\n'.join('- '+subject for subject in subjects[:12]) or 'Release '+value
 def entry(archive,repository,value,timestamp=None):
     version(value)
     if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+',repository): raise ValueError('Invalid repository.')
@@ -33,6 +42,9 @@ def merge(incoming):
     new=incoming['versions'][0]
     previous=next((item for item in history if item['guid']==GUID),None)
     versions=previous['versions'] if previous else []
+    for release in versions:
+        if release.get('changelog') == 'Release '+release['version'] and (written := written_notes(release['version'])):
+            release['changelog'] = written
     existing=next((v for v in versions if v['version']==new['version']),None)
     if existing and existing['checksum']!=new['checksum']:raise ValueError('Refusing to replace a published version with different bytes. Bump the version.')
     incoming['versions']=sorted(([new] if not existing else [])+versions,key=lambda v:key(v['version']),reverse=True)

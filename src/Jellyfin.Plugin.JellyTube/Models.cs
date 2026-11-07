@@ -31,7 +31,7 @@ public sealed class LibraryBinding
 public sealed record VideoInfo(string Id, string Title, string Channel, string ChannelId, string Thumbnail,
     double? DurationSeconds = null, string? Description = null, DateTimeOffset? PublishedAt = null, string[]? Tags = null);
 public sealed record CatalogPage(List<VideoInfo> Items, string? NextPageToken = null);
-public sealed record UserSettings(bool Autoplay = false, int MaxHeight = 720, string Language = "en",
+public sealed record UserSettings(bool Autoplay = false, int MaxHeight = 1080, string Language = "en",
     string Region = "NL", string SafeSearch = "strict", bool RecordHistory = true, string View = "grid");
 public sealed record SavedVideo(VideoInfo Video, DateTimeOffset AddedAt);
 public sealed record ChannelInfo(string Id, string Name, string Thumbnail);
@@ -50,7 +50,7 @@ public sealed record AdaptiveTrack(string Url, string Codec, long Size, long Bit
 public sealed record MediaSegment(long Start, long End, uint Duration);
 public sealed record SegmentIndex(long Start, long End, long InitEnd, uint Timescale, ulong PresentationTime, List<MediaSegment> Segments);
 public sealed record AdaptiveSource(AdaptiveTrack Video, AdaptiveTrack Audio, DateTimeOffset ExpiresAt);
-public sealed record ProgressiveSource(string Url, long Size, string Identity);
+public sealed record ProgressiveSource(string Url, long Size, string Identity, int Height);
 public sealed record PlaybackSource(AdaptiveSource? Adaptive, ProgressiveSource? Progressive, DateTimeOffset ExpiresAt);
 
 public static partial class Rules

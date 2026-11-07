@@ -28,12 +28,16 @@ class CatalogTests(unittest.TestCase):
             meta['version']='0.1.0.0'
             (base/'meta.json').write_text(json.dumps(meta))
             (base/'build.yaml').write_text((ROOT/'build.yaml').read_text())
+            (base/'CHANGELOG.md').write_text('## 0.1.0.0\n\n- Initial playback.\n',encoding='utf-8')
             (base/'src/Jellyfin.Plugin.JellyTube/Jellyfin.Plugin.JellyTube.csproj').write_text('<Project><Version>0.1.0.0</Version></Project>')
-            def record(version,checksum):return {'guid':catalog.GUID,'versions':[{'version':version,'checksum':checksum,'timestamp':'2026-11-07T00:00:00Z','changelog':'Release'}]}
+            def record(version,checksum):return {'guid':catalog.GUID,'versions':[{'version':version,'checksum':checksum,'timestamp':'2026-11-07T00:00:00Z','changelog':'Release '+version}]}
             previous=catalog.ROOT;catalog.ROOT=base
             try:
                 catalog.merge(record('0.1.0.0','a'));catalog.merge(record('0.1.0.1','b'))
-                self.assertEqual(['0.1.0.1','0.1.0.0'],[v['version'] for v in json.loads((base/'manifest.json').read_text())[0]['versions']])
+                versions=json.loads((base/'manifest.json').read_text())[0]['versions']
+                self.assertEqual(['0.1.0.1','0.1.0.0'],[v['version'] for v in versions])
+                self.assertEqual('- Initial playback.',versions[1]['changelog'])
+                self.assertEqual('a',versions[1]['checksum'])
                 with self.assertRaises(ValueError):catalog.merge(record('0.1.0.0','different'))
                 self.assertEqual('0.1.0.1',json.loads((base/'meta.json').read_text())['version'])
             finally:catalog.ROOT=previous

@@ -20,7 +20,8 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
         await page.route('**/JellyTube/Me/Recommendations/Topics', route => route.fulfill({ json: { items } }));
         await page.route('**/JellyTube/Explore?topic=*', route => {
           const topic = new URL(route.request().url()).searchParams.get('topic');
-          return route.fulfill({ json: { items: [{ ...items[0], title: topic + ' discovery' }] } });
+          const index = ['technology', 'science', 'music', 'gaming', 'food', 'travel', 'sports'].indexOf(topic);
+          return route.fulfill({ json: { items: [{ ...items[index], title: topic + ' discovery' }] } });
         });
       }
       await page.goto(s.base + '/web/');
@@ -30,6 +31,7 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
       const feeds = page.getByRole('navigation', { name: 'Home feeds' });
       if (name === 'desktop') {
         await page.locator('.jt-card').nth(23).waitFor();
+        await page.getByLabel('Sort loaded videos').selectOption('newest');
         assert.equal(await page.locator('.jt-card .jt-title').first().textContent(), 'Recommendation 13');
         await page.getByRole('button', { name: 'Load more', exact: true }).scrollIntoViewIfNeeded();
         await page.locator('.jt-card').nth(24).waitFor();
@@ -39,6 +41,9 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
         await feeds.getByRole('button', { name: 'Explore', exact: true }).click();
         await page.getByRole('navigation', { name: 'Explore topics' }).getByRole('button', { name: 'Gaming', exact: true }).click();
         await page.getByText('gaming discovery', { exact: true }).waitFor();
+        await feeds.getByRole('button', { name: 'General', exact: true }).click();
+        assert.equal(await feeds.getByRole('button', { name: 'General', exact: true }).getAttribute('aria-pressed'), 'true');
+        await page.locator('.jt-card').nth(2).waitFor();
         await feeds.getByRole('button', { name: 'Watch later', exact: true }).click();
         assert.equal(await feeds.getByRole('button', { name: 'Watch later', exact: true }).getAttribute('aria-pressed'), 'true');
       }
@@ -91,6 +96,26 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
         await play.waitFor();
         assert.ok(await play.isVisible());
         checks.push({ check: 'keyboard details and cancelling a stalled playback preparation', passed: true });
+        const directStarted = performance.now();
+        await play.click();
+        const direct = page.locator('.jt-direct-player[open]');
+        await direct.getByText(/Direct playback ·/).waitFor({ timeout: 70000 });
+        const directFirstFrameMs = Math.round(performance.now() - directStarted);
+        await direct.locator('video').evaluate(video => { video.currentTime = 12; });
+        await page.waitForFunction(() => {
+          const video = document.querySelector('.jt-direct-player video');
+          return video && !video.seeking && video.currentTime >= 12;
+        }, null, { timeout: 30000 });
+        const savedProgress = page.waitForResponse(response => response.url().endsWith('/Progress') && response.status() === 204
+          && response.request().postDataJSON().positionSeconds >= 12);
+        await direct.getByRole('button', { name: 'Back', exact: true }).click();
+        await savedProgress;
+        await play.click();
+        await page.waitForFunction(() => {
+          const video = document.querySelector('.jt-direct-player video');
+          return video && !video.paused && video.currentTime >= 11;
+        }, null, { timeout: 30000 });
+        checks.push({ check: 'direct playback and saved resume position', passed: true, firstFrameMs: directFirstFrameMs });
         let releaseNegotiation;
         const delayedNegotiation = new Promise(resolve => { releaseNegotiation = resolve; });
         await page.route('**/Items/*/PlaybackInfo*', async route => {
@@ -98,7 +123,7 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
           await route.continue();
         }, { times: 1 });
         const started = performance.now();
-        await play.click();
+        await direct.getByRole('button', { name: 'Play in Jellyfin' }).click();
         await page.getByText('Opening Jellyfin player…', { exact: true }).waitFor();
         await page.evaluate(() => {
           const now = performance.now.bind(performance);
@@ -123,6 +148,7 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
         checks.push({ check: 'one-click native web playback', passed: true, videoWidth: state.width, firstFrameMs });
         const warmStarted = performance.now();
         await play.click();
+        await direct.getByRole('button', { name: 'Play in Jellyfin' }).click();
         await page.waitForFunction(() => {
           const video = document.querySelector('video');
           return document.getElementById('jt-app')?.hidden && video?.readyState >= 2 && !video.paused && video.currentTime > 0;

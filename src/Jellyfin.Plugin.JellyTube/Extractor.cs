@@ -57,9 +57,10 @@ public sealed class Extractor
             var manifest = await ResolveFormats(id, timeout.Token);
             var indexing = System.Diagnostics.Stopwatch.GetTimestamp();
             var video = manifest.GetVideoOnlyStreams().Where(s => s.Container.Name == "mp4" && s.VideoResolution.Height <= height)
-                .OrderByDescending(s => s.VideoCodec.StartsWith("avc", StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(s => s.VideoResolution.Height)
+                .ThenByDescending(s => s.VideoCodec.StartsWith("avc", StringComparison.OrdinalIgnoreCase))
                 .ThenByDescending(s => s.VideoQuality.Framerate is > 0 and <= 30)
-                .ThenByDescending(s => s.VideoResolution.Height).ThenByDescending(s => s.Bitrate).FirstOrDefault();
+                .ThenByDescending(s => s.Bitrate).FirstOrDefault();
             var audio = PreferOriginalAudio(manifest.GetAudioOnlyStreams().Where(s => s.Container.Name == "mp4"))
                 .ThenByDescending(s => s.Bitrate).FirstOrDefault();
             var progressive = PreferOriginalAudio(manifest.GetMuxedStreams().Where(s => s.Container.Name == "mp4"
@@ -78,7 +79,7 @@ public sealed class Extractor
                     $"{progressive.Size.Bytes}|{progressive.VideoCodec}|{progressive.AudioCodec}|{progressive.AudioLanguage?.Name}|{progressive.VideoResolution}")))[..24];
                 _logger.LogInformation("JellyTube selected an unchanged MP4 in {FormatsMs:F0} ms. Audio language {Language}.",
                     System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds, progressive.AudioLanguage?.Code ?? "unknown");
-                return new(null, new(progressive.Url, progressive.Size.Bytes, identity), expires);
+                return new(null, new(progressive.Url, progressive.Size.Bytes, identity, progressive.VideoResolution.Height), expires);
             }
             if (video is null || audio is null) throw new ProviderException("No supported audio and video combination is available.");
             var videoIndex = IndexTrack(id, "video", video, video.VideoCodec, video.VideoResolution.Width, video.VideoResolution.Height, timeout.Token);

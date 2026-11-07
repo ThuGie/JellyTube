@@ -32,11 +32,11 @@ public sealed class CoreTests : IDisposable
     {
         _store.Put("alice", "favorite", "video", "Alice's private favorite");
         _store.Put("bob", "favorite", "video", "Bob's private favorite");
-        _store.Put("alice", "settings", "current", new UserSettings(MaxHeight: 1080));
+        _store.Put("alice", "settings", "current", new UserSettings(MaxHeight: 720));
         var reopened = new Store(Path.Combine(_directory, "test.db"));
         Assert.Equal("Alice's private favorite", reopened.Get<string>("alice", "favorite", "video"));
         Assert.Equal("Bob's private favorite", reopened.Get<string>("bob", "favorite", "video"));
-        Assert.Equal(1080, reopened.Settings("alice").MaxHeight); Assert.Equal(720, reopened.Settings("bob").MaxHeight);
+        Assert.Equal(720, reopened.Settings("alice").MaxHeight); Assert.Equal(1080, reopened.Settings("bob").MaxHeight);
         reopened.Delete("alice", "favorite"); Assert.Single(reopened.List<string>("bob", "favorite"));
     }
     [Fact]
