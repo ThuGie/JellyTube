@@ -115,6 +115,30 @@ jobs:
             git pull --rebase origin main
             git push origin HEAD:main
           fi
+      - name: Verify the public Jellyfin catalog
+        shell: bash
+        run: |
+          set -euo pipefail
+          catalog="https://raw.githubusercontent.com/$GH_REPO/main/manifest.json"
+          published="$RUNNER_TEMP/jellytube-public-manifest.json"
+          for attempt in {1..36}; do
+            if curl --fail --silent --show-error --max-time 10 "$catalog" --output "$published" &&
+               jq -e --slurpfile expected "$RUNNER_TEMP/jellytube-entry.json" '
+                 $expected[0] as $plugin |
+                 $plugin.versions[0] as $release |
+                 any(.[] | select(.guid == $plugin.guid) | .versions[];
+                     .version == $release.version and
+                     .sourceUrl == $release.sourceUrl and
+                     .targetAbi == $release.targetAbi and
+                     .checksum == $release.checksum)
+               ' "$published" >/dev/null; then
+              echo "The public catalog serves JellyTube $VERSION."
+              exit 0
+            fi
+            if (( attempt < 36 )); then sleep 10; fi
+          done
+          echo "::error::The public catalog did not serve JellyTube $VERSION with the expected metadata at $catalog."
+          exit 1
       - uses: actions/upload-artifact@v4
         with:
           name: JellyTube-${{ needs.resolve.outputs.version }}
