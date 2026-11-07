@@ -24,15 +24,18 @@ public sealed class MediaController(Store store, NativeLibrary native, Extractor
         if (downloads.PlaybackFile(id, height, asset) is not null)
             return Redirect(Plugin.Instance.Configuration.PublicBaseUrl.TrimEnd('/') + "/JellyTube/Media/" + owner + "/" + id + "/" + secret + "/local.mp4");
         var seconds = asset.Video.DurationSeconds;
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var resolution = extractor.ResolveAdaptive(id, height, ct);
         if (seconds is null or <= 0)
         {
-            var details = await extractor.Details(id, ct); seconds = details.DurationSeconds;
+            var details = extractor.Details(id, ct);
+            await Task.WhenAll(resolution, details);
+            seconds = (await details).DurationSeconds;
         }
         if (seconds is null or <= 0) throw new ProviderException("Live or unknown-duration videos are not supported in this preview.");
         var prefix = Plugin.Instance.Configuration.PublicBaseUrl.TrimEnd('/') + "/JellyTube/Media/" + owner + "/" + id + "/" + secret + "/";
-        var started = System.Diagnostics.Stopwatch.GetTimestamp();
-        var source = await extractor.ResolveAdaptive(id, height, ct);
-        logger.LogDebug("JellyTube media request {Reference} resolved the YouTube source in {ResolutionMs:F0} ms.",
+        var source = await resolution;
+        logger.LogInformation("JellyTube media request {Reference} prepared the streaming manifest in {ResolutionMs:F0} ms.",
             HttpContext.TraceIdentifier, System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds);
         var xml = ManifestXml(source, seconds.Value, prefix, height);
         return Content(xml, "application/dash+xml");
@@ -93,7 +96,7 @@ public sealed class MediaController(Store store, NativeLibrary native, Extractor
                 request.Headers.Range = range;
             }
             var single = request.Headers.Range?.Ranges.SingleOrDefault();
-            var cacheKey = $"{id}|{track}|{fingerprint}|{single?.From}|{single?.To}";
+            var cacheKey = SegmentCache.Key(id, track, fingerprint, single?.From, single?.To);
             using var fill = !HttpMethods.IsHead(Request.Method) && single?.From is { } start && single.To is { } end
                 && end >= start && end - start < 4 * 1024 * 1024
                 ? await cache.EnterFill(cacheKey, deadline.Token) : null;

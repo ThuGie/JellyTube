@@ -15,7 +15,7 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
         const items = Array.from({ length: 36 }, (_, index) => ({
           id: 'feed' + String(index).padStart(7, '0'), title: 'Recommendation ' + index,
           channel: 'Creator ' + index % 12, channelId: 'creator-' + index % 12, durationSeconds: 600,
-          publishedAt: '2026-01-01', description: 'A video from the recommendation fixture.'
+          publishedAt: index === 13 ? '2026-02-01' : '2026-01-01', description: 'A video from the recommendation fixture.'
         }));
         await page.route('**/JellyTube/Me/Recommendations/Topics', route => route.fulfill({ json: { items } }));
         await page.route('**/JellyTube/Explore?topic=*', route => {
@@ -30,8 +30,12 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
       const feeds = page.getByRole('navigation', { name: 'Home feeds' });
       if (name === 'desktop') {
         await page.locator('.jt-card').nth(23).waitFor();
-        await page.getByRole('button', { name: 'Load more', exact: true }).click();
+        assert.equal(await page.locator('.jt-card .jt-title').first().textContent(), 'Recommendation 13');
+        await page.getByRole('button', { name: 'Load more', exact: true }).scrollIntoViewIfNeeded();
         await page.locator('.jt-card').nth(24).waitFor();
+        await page.getByLabel('Sort loaded videos').selectOption('oldest');
+        assert.notEqual(await page.locator('.jt-card .jt-title').first().textContent(), 'Recommendation 13');
+        await page.getByLabel('Sort loaded videos').selectOption('newest');
         await feeds.getByRole('button', { name: 'Explore', exact: true }).click();
         await page.getByRole('navigation', { name: 'Explore topics' }).getByRole('button', { name: 'Gaming', exact: true }).click();
         await page.getByText('gaming discovery', { exact: true }).waitFor();
@@ -78,9 +82,13 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
           await route.abort().catch(() => {});
         }, { times: 1 });
         await play.click();
-        await page.locator('.jt-playback-notice').getByRole('button', { name: 'Cancel' }).click();
+        await page.locator('.jt-playback-notice').waitFor();
+        await page.locator('.jt-nav').getByRole('button', { name: 'Search', exact: true }).click();
+        await page.getByLabel('Search videos or paste a YouTube URL').waitFor();
         release();
         await page.locator('.jt-playback-notice').waitFor({ state: 'detached' });
+        await page.locator('.jt-nav').getByRole('button', { name: 'Library', exact: true }).click();
+        await play.waitFor();
         assert.ok(await play.isVisible());
         checks.push({ check: 'keyboard details and cancelling a stalled playback preparation', passed: true });
         const started = performance.now();

@@ -5,6 +5,8 @@ namespace Jellyfin.Plugin.JellyTube;
 /// <summary>Small, bounded cache of public media ranges. No account data, signed URLs or credentials in keys.</summary>
 public sealed class SegmentCache : IDisposable
 {
+    internal static string Key(string id, string track, string fingerprint, long? start, long? end) =>
+        FormattableString.Invariant($"{id}|{track}|{fingerprint}|{start}|{end}");
     private readonly MemoryCache _cache = new(new MemoryCacheOptions { SizeLimit = 16 * 1024 * 1024 });
     private readonly SemaphoreSlim _streams = new(8);
     private readonly SemaphoreSlim[] _fills = Enumerable.Range(0, 64).Select(_ => new SemaphoreSlim(1)).ToArray();

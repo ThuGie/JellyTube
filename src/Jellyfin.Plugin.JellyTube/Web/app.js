@@ -19,8 +19,19 @@
   };
   const message = (text, error = false) => { if (!status) return; status.className = 'jt-status' + (error ? ' jt-error' : ''); status.textContent = text; };
   const button = (label, action, cls = '') => {
-    const b = el('button', cls, label); b.type = 'button'; b.onclick = async () => { b.disabled = true; try { await action(b); } catch (e) { message(e.message, true); } finally { b.disabled = false; } }; return b;
+    const b = el('button', cls, label); b.type = 'button'; b.onclick = async event => { event.stopPropagation(); b.disabled = true; try { await action(b); } catch (e) { message(e.message, true); } finally { b.disabled = false; } }; return b;
   };
+  let scrollFrame = 0;
+  document.addEventListener('scroll', () => {
+    if (scrollFrame || !root || root.hidden) return;
+    scrollFrame = requestAnimationFrame(() => {
+      scrollFrame = 0;
+      const more = root?.querySelector('button.jt-auto-more:not([hidden]):not(:disabled)');
+      if (!more || root.hidden) return;
+      const area = more.getBoundingClientRect();
+      if (area.height && area.bottom > 0 && area.top < innerHeight + 250) more.click();
+    });
+  }, { capture: true, passive: true });
   const field = (label, value, type = 'text') => { const wrap = el('label', '', label), input = el('input'); input.type = type; if (type === 'checkbox') input.checked = value; else input.value = value ?? ''; wrap.append(input); return [wrap, input]; };
   const select = (label, value, values) => { const wrap = el('label', '', label), input = el('select'); for (const [key, name] of values) { const o = el('option', '', name); o.value = key; input.append(o); } input.value = value; wrap.append(input); return [wrap, input]; };
   const heading = (title, subtitle) => { main.append(el('div', 'jt-kicker', 'JELLYTUBE / YOUR VIDEO SPACE'), el('h1', '', title)); if (subtitle) main.append(el('p', '', subtitle)); };
@@ -206,7 +217,7 @@
     cardDetails.set(id, result);
     return result;
   }
-  function card(video, sequence = [video]) {
+  function card(video, sequence = [video], onMetadata) {
     const c = el('article', 'jt-card'), img = el('img', 'jt-image'); img.alt = ''; img.loading = 'lazy'; img.referrerPolicy = 'no-referrer';
     // Images are derived from a validated provider ID, never arbitrary stored HTML/URLs.
     img.src = `https://i.ytimg.com/vi/${encodeURIComponent(video.id)}/hqdefault.jpg`;
@@ -232,6 +243,7 @@
         video.description ??= details.description;
         video.tags ??= details.tags;
         showMetadata(details);
+        onMetadata?.();
       };
       detailObserver.observe(info);
     }
@@ -268,7 +280,7 @@
       if (dialog.open) note.textContent = error.message;
     });
   }
-  const videoSort = () => select('Sort loaded videos', 'default', [
+  const videoSort = (value = 'default') => select('Sort loaded videos', value, [
     ['default', 'Original order'], ['newest', 'Newest first'], ['oldest', 'Oldest first'],
     ['title', 'Title A–Z'], ['shortest', 'Shortest first'], ['longest', 'Longest first']
   ]);
@@ -412,7 +424,7 @@
         const row = el('div', 'jt-row'), detail = el('div'); detail.append(el('strong', '', item.title), el('div', 'jt-small', item.author)); row.append(detail);
         row.append(button(item.kind === 'channels' ? 'Open channel' : 'Browse playlist', async () => { if (item.kind === 'channels') await channel(item.id, item.title); else await providerPlaylist(item.id, item.title); }, 'jt-primary')); results.append(row);
       }
-      moreButton = searchState.next ? button('Load more', () => load(searchState, true)) : null;
+      moreButton = searchState.next ? button('Load more', () => load(searchState, true), 'jt-auto-more') : null;
       if (moreButton) results.append(moreButton);
       if (offset) {
         const firstNew = searchState.kind === 'videos' ? results.querySelector('.jt-grid')?.children[offset] : results.children[offset];
@@ -482,7 +494,7 @@
       draw();
       next = page.nextPageToken === next ? null : page.nextPageToken;
       if (!next) { control.remove(); message('All available videos loaded.'); }
-    }));
+    }, 'jt-auto-more'));
   }
   async function channel(id, name) {
     const back = openSubpage();
@@ -509,6 +521,7 @@
   ];
   const dailyTopic = () => exploreTopics[Math.floor(Date.now() / 86400000) % exploreTopics.length][0];
   let homeFeed = 'for-you', homeFormat = 'videos', exploreTopic;
+  const homeSort = new Map();
   async function renderHome() {
     heading('YouTube');
     if (!session.nativeLibrary) message('Ask an administrator to set up the shared JellyTube library for playback.');
@@ -527,7 +540,13 @@
       control.dataset.topic = id;
       topics.append(control);
     }
-    main.append(nav, topics, formats, hint, feed);
+    const sort = videoSort();
+    sort[1].onchange = () => {
+      homeSort.set(homeFeed, sort[1].value);
+      reorderFeed();
+    };
+    let reorderFeed = () => {};
+    main.append(nav, topics, formats, hint, sort[0], feed);
     const pageStatus = status;
     const pages = new Map();
     function cachedPage(path) {
@@ -551,13 +570,23 @@
       for (const control of nav.children) control.setAttribute('aria-pressed', String(control.dataset.feed === kind));
       for (const control of topics.children) control.setAttribute('aria-pressed', String(control.dataset.topic === topic));
       const saved = ['continue', 'later', 'favorites'].includes(kind);
+      sort[1].value = homeSort.get(kind) || (kind === 'continue' ? 'default' : 'newest');
+      sort[0].hidden = false;
+      reorderFeed = () => {};
       topics.hidden = kind !== 'explore';
       formats.hidden = saved;
       hint.hidden = saved || homeFormat !== 'shorts';
       if (saved) {
         const videos = kind === 'continue' ? resume : library[kind === 'later' ? 'watchLater' : 'favorites'];
         feed.replaceChildren();
-        if (videos.length) grid(videos.map(entry => entry.video), feed, false, false);
+        if (videos.length) {
+          const entries = videos.map(entry => entry.video);
+          reorderFeed = () => {
+            feed.replaceChildren();
+            grid(sortedVideos(entries, sort[1].value), feed, false, false);
+          };
+          reorderFeed();
+        }
         else feed.append(el('p', 'jt-empty', kind === 'continue'
           ? 'Videos you pause partway through appear here when history is enabled.'
           : 'Save a video to see it here.'));
@@ -573,9 +602,25 @@
       if (!isCurrent()) return;
       const sources = results.flatMap((result, index) => result.status === 'fulfilled'
         ? [{ path: paths[index], items: result.value.items, next: result.value.nextPageToken }] : []);
-      const videos = [], seen = new Set(kind === 'for-you' ? watched : []);
+      const videos = [], feedOrder = [], seen = new Set(kind === 'for-you' ? watched : []);
       const deferred = [];
       const cards = el('div', 'jt-grid');
+      const nodes = new Map();
+      let rerank;
+      const reorder = () => {
+        if (!isCurrent()) return;
+        const ordered = sortedVideos(feedOrder, sort[1].value);
+        const current = [...cards.children];
+        if (ordered.every((video, index) => current[index] === nodes.get(video.id))) return;
+        const anchor = current.find(node => node.getBoundingClientRect().bottom > 0);
+        const top = anchor?.getBoundingClientRect().top;
+        const focused = document.activeElement;
+        ordered.forEach(video => cards.append(nodes.get(video.id)));
+        if (anchor && top !== undefined) root.scrollTop += anchor.getBoundingClientRect().top - top;
+        if (cards.contains(focused)) focused.focus({ preventScroll: true });
+        videos.splice(0, videos.length, ...ordered);
+      };
+      reorderFeed = reorder;
       const more = button('Load more', async () => {
         if (candidates().length < 24) {
           const pageable = sources.filter(source => source.next).slice(0, 4);
@@ -592,7 +637,7 @@
             throw new Error('More videos are temporarily unavailable. Try again.');
         }
         append();
-      });
+      }, 'jt-auto-more');
       function candidates() {
         const output = [], unique = new Set(seen);
         const count = Math.max(0, ...sources.map(source => source.items.length));
@@ -609,7 +654,7 @@
       }
       function append() {
         const creators = new Map();
-        const available = candidates();
+        const available = sortedVideos(candidates(), sort[1].value);
         deferred.length = 0;
         let added = 0;
         for (const video of available) {
@@ -621,20 +666,29 @@
           if (++added === 24) break;
         }
         if (added < 12) for (const video of deferred.slice(0, 12 - added)) add(video);
+        reorder();
         more.hidden = !candidates().length && !sources.some(source => source.next);
         if (videos.length) feed.querySelector('.jt-empty')?.remove();
       }
       function add(video) {
         seen.add(video.id);
         videos.push(video);
-        cards.append(card(video, videos));
+        feedOrder.push(video);
+        const node = card(video, videos, () => {
+          if (!['newest', 'oldest'].includes(sort[1].value)) return;
+          clearTimeout(rerank);
+          rerank = setTimeout(reorder, 250);
+        });
+        nodes.set(video.id, node);
+        cards.append(node);
       }
       feed.replaceChildren(cards, more);
       append();
       if (!videos.length) {
         feed.prepend(el('p', 'jt-empty', results.length && !sources.length
           ? 'This feed is temporarily unavailable.'
-          : kind === 'following' && !followed.length ? 'Follow a channel to see uploads here.' : 'No videos match this format yet.'));
+          : kind === 'following' && !followed.length ? 'Follow a channel to see uploads here.'
+          : kind === 'explore' ? 'No relevant videos match this topic and format on this page.' : 'No videos match this format yet.'));
         if (kind === 'following' && !followed.length) feed.append(button('Find channels', () => {
           searchState = { query: '', kind: 'channels', items: [], next: null };
           return navigate('search');
@@ -727,13 +781,20 @@
     }
   }
   async function navigate(next, push = true) {
-    if (!root) return; clearTimeout(timer); generation++; tab = next; main.replaceChildren();
+    if (!root) return;
+    preparing?.abort('cancelled');
+    if (playbackReturn && !playbackReturn.entered) finishPlayback(playbackReturn);
+    clearTimeout(timer); generation++; tab = next; main.replaceChildren();
     const version = generation;
     status = el('div', 'jt-status'); status.setAttribute('role', 'status'); main.append(status);
     root.classList.toggle('jt-list', session?.settings.view === 'list');
     for (const b of root.querySelectorAll('[data-tab]')) { if (b.dataset.tab === next) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); }
     if (push && !root.classList.contains('jt-embedded')) history.replaceState({ ...(history.state || {}), jellyTube: next }, '', location.href);
     try {
+      if (next === 'search') {
+        await renderSearch();
+        return;
+      }
       if (next !== 'admin') {
         message('Loading JellyTube…');
         const currentLibrary = await api('Me/Library');
@@ -741,8 +802,7 @@
         library = currentLibrary;
         message('');
       }
-      if (next === 'search') await renderSearch();
-      else if (next === 'library') await renderLibrary();
+      if (next === 'library') await renderLibrary();
       else if (next === 'downloads') await renderDownloads();
       else if (next === 'settings') await renderSettings();
       else if (next === 'admin') await renderAdmin();
@@ -772,7 +832,7 @@
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && root && !root.hidden && !root.querySelector('dialog[open]') && !root.classList.contains('jt-embedded')) close(); });
   function mount() {
     const scope = account();
-    if (lastUser && scope !== lastUser) { close(false); library = null; cardDetails.clear(); detailQueue.length = 0; homeFeed = 'for-you'; homeFormat = 'videos'; exploreTopic = undefined; searchState = { query: '', kind: 'videos', items: [], next: null }; document.getElementById('jt-launch')?.remove(); }
+    if (lastUser && scope !== lastUser) { close(false); library = null; cardDetails.clear(); detailQueue.length = 0; homeFeed = 'for-you'; homeFormat = 'videos'; homeSort.clear(); exploreTopic = undefined; searchState = { query: '', kind: 'videos', items: [], next: null }; document.getElementById('jt-launch')?.remove(); }
     lastUser = scope;
     updatePlaybackPage();
     if (document.getElementById('jt-launch') || typeof ApiClient === 'undefined' || !ApiClient.accessToken()) return;

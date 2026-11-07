@@ -78,7 +78,7 @@ public sealed class Catalog(Store store, Extractor extractor, IHttpClientFactory
         new[] { "youtube", "video", "shorts", "viral", "trending", "subscribe", "official", "4k video" }
             .Contains(value, StringComparer.OrdinalIgnoreCase);
 
-    public Task<CatalogPage> Explore(string owner, string topic, string? page, CancellationToken ct)
+    public async Task<CatalogPage> Explore(string owner, string topic, string? page, CancellationToken ct)
     {
         var query = topic switch
         {
@@ -91,7 +91,29 @@ public sealed class Catalog(Store store, Extractor extractor, IHttpClientFactory
             "sports" => "sports highlights and stories",
             _ => throw new ValidationException("Unknown Explore topic.")
         };
-        return Search(owner, query, page, ct, TimeSpan.FromHours(2));
+        var result = await Search(owner, query, page, ct, TimeSpan.FromHours(2));
+        return new(result.Items.Where(video => MatchesExploreTopic(topic, video.Title)).ToList(), result.NextPageToken);
+    }
+
+    internal static bool MatchesExploreTopic(string topic, string title)
+    {
+        var pattern = topic switch
+        {
+            "music" => @"\b(music|concert|song|album|orchestra|symphony|choir|acoustic|instrumental|live session)\b",
+            "technology" => @"\b(tech(nology)?|software|computer|smartphone|robot\w*|chip\w*|linux|programming|gadget\w*|ai)\b",
+            "science" => @"\b(science|nature|wildlife|physics|biology|chemistry|planet\w*|ocean\w*|space|astronom\w*)\b",
+            "gaming" => @"\b(gaming|gameplay|video game\w*|walkthrough|playthrough|playstation|xbox|nintendo)\b",
+            "food" => @"\b(cook\w*|recipe\w*|baking|bake|food|chef|meal\w*|kitchen)\b",
+            "travel" => @"\b(travel\w*|tour\w*|destination\w*|visit\w*|vacation|itinerary|road trip)\b",
+            "sports" => @"\b(sport\w*|football|soccer|basketball|baseball|tennis|hockey|rugby|cricket|athletics|olympic\w*)\b",
+            _ => ""
+        };
+        const System.Text.RegularExpressions.RegexOptions options = System.Text.RegularExpressions.RegexOptions.IgnoreCase
+            | System.Text.RegularExpressions.RegexOptions.CultureInvariant;
+        if (topic == "music" && System.Text.RegularExpressions.Regex.IsMatch(title,
+            @"\b(build\w*|shed\w*|woodwork\w*|workshop|renovat\w*|construct\w*|diy|makeover)\b", options))
+            return false;
+        return pattern.Length > 0 && System.Text.RegularExpressions.Regex.IsMatch(title, pattern, options);
     }
 
     public async Task<CatalogPage> Search(string owner, string query, string? page, CancellationToken ct, TimeSpan? cacheDuration = null)
@@ -108,11 +130,7 @@ public sealed class Catalog(Store store, Extractor extractor, IHttpClientFactory
                 throw new ProviderException("Today's search budget has been reached. Saved videos and native playback remain available.");
             CatalogPage result;
             if (!string.IsNullOrWhiteSpace(config.ApiKey)) result = await OfficialSearch(query, page, settings, ct);
-            else
-            {
-                if (!string.IsNullOrEmpty(page)) throw new ValidationException("Extractor search returns a bounded first page. Refine your query.");
-                result = await extractor.Search(query, ct);
-            }
+            else result = await extractor.Search(query, ct, page);
             if (_cache.Count > 200) foreach (var old in _cache.OrderBy(x => x.Value.Expires).Take(50)) _cache.TryRemove(old.Key, out _);
             _cache[key] = (DateTimeOffset.UtcNow + (cacheDuration ?? TimeSpan.FromMinutes(10)), result); return result;
         }

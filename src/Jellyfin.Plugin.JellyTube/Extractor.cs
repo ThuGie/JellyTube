@@ -19,7 +19,8 @@ public sealed class Extractor
     private readonly ConcurrentDictionary<string, (DateTimeOffset Expires, CatalogPage Page)> _uploads = new();
     private readonly ConcurrentDictionary<string, (DateTimeOffset Expires, VideoInfo Video)> _details = new();
     private readonly IHttpClientFactory _http;
-    public Extractor(IHttpClientFactory http) { _http = http; _youtube = new(http.CreateClient("JellyTube.YouTube")); }
+    private readonly SegmentCache _segments;
+    public Extractor(IHttpClientFactory http, SegmentCache segments) { _http = http; _segments = segments; _youtube = new(http.CreateClient("JellyTube.YouTube")); }
     public async Task<AdaptiveSource> ResolveAdaptive(string id, int maxHeight, CancellationToken ct)
     {
         Rules.VideoId(id); var key = id + ":" + maxHeight;
@@ -55,8 +56,8 @@ public sealed class Extractor
                 ?? throw new ProviderException("No supported adaptive video format is available.");
             var audio = manifest.GetAudioOnlyStreams().Where(s => s.Container.Name == "mp4").OrderByDescending(s => s.Bitrate).FirstOrDefault()
                 ?? throw new ProviderException("No supported adaptive audio format is available.");
-            var videoIndex = IndexTrack(video, video.VideoCodec, video.VideoResolution.Width, video.VideoResolution.Height, timeout.Token);
-            var audioIndex = IndexTrack(audio, audio.AudioCodec, 0, 0, timeout.Token);
+            var videoIndex = IndexTrack(id, "video", video, video.VideoCodec, video.VideoResolution.Width, video.VideoResolution.Height, timeout.Token);
+            var audioIndex = IndexTrack(id, "audio", audio, audio.AudioCodec, 0, 0, timeout.Token);
             await Task.WhenAll(videoIndex, audioIndex);
             return new(await videoIndex, await audioIndex, DateTimeOffset.UtcNow.AddMinutes(5));
         }
@@ -64,7 +65,7 @@ public sealed class Extractor
         { throw new ProviderException("Managed YouTube extraction failed. The video may be restricted or the extractor needs an update."); }
         finally { _slots.Release(); }
     }
-    private async Task<AdaptiveTrack> IndexTrack(IStreamInfo stream, string codec, int width, int height, CancellationToken ct)
+    private async Task<AdaptiveTrack> IndexTrack(string id, string kind, IStreamInfo stream, string codec, int width, int height, CancellationToken ct)
     {
         if (!AllowedMediaUri(stream.Url)) throw new ProviderException("The provider returned an unsupported media destination.");
         using var request = new HttpRequestMessage(HttpMethod.Get, stream.Url);
@@ -83,7 +84,14 @@ public sealed class Extractor
         var indexBytes = output.ToArray(); var index = Mp4Index.Segments(indexBytes);
         if (index.Segments.Any(s => s.End >= stream.Size.Bytes)) throw new ProviderException("The stream index exceeds its media bounds.");
         var identity = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(indexBytes.AsSpan((int)index.Start, (int)(index.End - index.Start + 1))));
-        return new(stream.Url, codec, stream.Size.Bytes, (long)stream.Bitrate.BitsPerSecond, width, height, index.Start, index.End, index.InitEnd, index.Timescale, index.PresentationTime, index.Segments, identity);
+        var track = new AdaptiveTrack(stream.Url, codec, stream.Size.Bytes, (long)stream.Bitrate.BitsPerSecond, width, height, index.Start, index.End, index.InitEnd, index.Timescale, index.PresentationTime, index.Segments, identity);
+        var fingerprint = MediaController.Fingerprint(track);
+        foreach (var (start, end) in new[] { (0L, index.InitEnd), (index.Start, index.End) })
+        {
+            if (start >= 0 && end >= start && end < indexBytes.Length)
+                _segments.Put(SegmentCache.Key(id, kind, fingerprint, start, end), indexBytes[(int)start..((int)end + 1)]);
+        }
+        return track;
     }
     public async Task<ExtractedSource> Resolve(string id, int maxHeight, CancellationToken ct)
     {
@@ -137,19 +145,22 @@ public sealed class Extractor
         catch (Exception ex) when (ex is not OperationCanceledException)
         { throw new ProviderException("Video details are unavailable. The video may be private or restricted."); }
     }
-    public async Task<CatalogPage> Search(string query, CancellationToken ct)
+    public async Task<CatalogPage> Search(string query, CancellationToken ct, string? page = null)
     {
         var items = new List<VideoInfo>();
+        var offset = PageOffset(page);
+        var remaining = offset;
         try
         {
             await foreach (var video in _youtube.Search.GetVideosAsync(query, ct))
             {
+                if (remaining-- > 0) continue;
                 var id = video.Id.Value;
                 items.Add(new(id, video.Title, video.Author.ChannelTitle, video.Author.ChannelId,
                     "https://i.ytimg.com/vi/" + id + "/hqdefault.jpg", video.Duration?.TotalSeconds));
-                if (items.Count == 20) break;
+                if (items.Count == 21) break;
             }
-            return new(items);
+            return BoundedPage(items, offset);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         { throw new ProviderException("YouTube search is unavailable. Retry later or use a video URL."); }

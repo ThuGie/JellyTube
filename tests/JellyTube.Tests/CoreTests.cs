@@ -7,6 +7,14 @@ namespace JellyTube.Tests;
 
 public sealed class CoreTests : IDisposable
 {
+    [Theory]
+    [InlineData("music", "I built a garden shed", false)]
+    [InlineData("music", "Building a shed with relaxing music", false)]
+    [InlineData("music", "Live acoustic concert", true)]
+    [InlineData("gaming", "Nintendo gameplay walkthrough", true)]
+    [InlineData("gaming", "Live acoustic concert", false)]
+    public void ExploreRequiresEvidenceOfTheSelectedTopic(string topic, string title, bool expected) =>
+        Assert.Equal(expected, Catalog.MatchesExploreTopic(topic, title));
     private readonly string _directory = Path.Combine(Path.GetTempPath(), "jellytube-test-" + Guid.NewGuid().ToString("N"));
     private readonly Store _store;
     public CoreTests() { SQLitePCL.Batteries_V2.Init(); _store = new(Path.Combine(_directory, "test.db")); }

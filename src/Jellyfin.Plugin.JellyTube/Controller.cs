@@ -119,10 +119,11 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
         var owner = Owner();
         access.Binding(owner);
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
-        var video = await Video(owner, id, ct);
+        Rules.VideoId(id);
         var height = Plugin.Instance.Configuration.SharedLibrary is null ? store.Settings(owner).MaxHeight : MediaController.SharedStreamHeight;
         if (downloads.PlaybackFile(id, height, store.Get<MediaAsset>(owner, "asset", id)) is null)
             _ = extractor.WarmAdaptive(id, height);
+        var video = await Video(owner, id, ct);
         var asset = await native.Prepare(owner, video, ct);
         var prepareMs = System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds;
         HttpContext.RequestServices.GetRequiredService<ILogger<JellyTubeController>>()
