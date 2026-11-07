@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
 using System.ComponentModel.DataAnnotations;
+using System.Reflection;
+using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
 using System.Xml.Linq;
 using MediaBrowser.Controller.Entities;
@@ -11,6 +13,16 @@ namespace Jellyfin.Plugin.JellyTube;
 
 public sealed class NativeLibrary(Store store, Access access, ILibraryManager library, IUserManager users, IFileSystem fileSystem, ILibraryMonitor monitor)
 {
+    // Newer Jellyfin builds add an optional collection type to this method.
+    private static readonly MethodInfo ResolvePathMethod = typeof(ILibraryManager).GetMethods()
+        .Where(method => method.Name == nameof(ILibraryManager.ResolvePath))
+        .Select(method => (Method: method, Parameters: method.GetParameters()))
+        .Where(candidate => candidate.Parameters.Length >= 3
+            && candidate.Parameters[0].ParameterType == typeof(FileSystemMetadata)
+            && candidate.Parameters[1].ParameterType == typeof(Folder)
+            && candidate.Parameters.Skip(2).All(parameter => parameter.IsOptional))
+        .OrderBy(candidate => candidate.Parameters.Length)
+        .First().Method;
     private readonly SemaphoreSlim _provision = new(1);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _locks = new();
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _scans = new();
@@ -143,12 +155,12 @@ public sealed class NativeLibrary(Store store, Access access, ILibraryManager li
     private Video RegisterVideo(string path, string directory, Folder root, VideoInfo info)
     {
         // Some library types resolve a directory containing a single video as the video itself.
-        var video = library.ResolvePath(fileSystem.GetDirectoryInfo(directory), root) as Video;
+        var video = ResolveVideo(fileSystem.GetDirectoryInfo(directory), root);
         var parent = root;
         if (video is null || !string.Equals(video.Path, path, StringComparison.Ordinal))
         {
             parent = GetOrRegisterFolder(directory, root);
-            video = library.ResolvePath(fileSystem.GetFileInfo(path), parent) as Video
+            video = ResolveVideo(fileSystem.GetFileInfo(path), parent)
                 ?? throw new InvalidOperationException("Jellyfin could not register the YouTube video.");
         }
         if (library.GetItemById(video.Id) is Video registered) return registered;
@@ -158,6 +170,23 @@ public sealed class NativeLibrary(Store store, Access access, ILibraryManager li
         video.ProviderIds["youtube"] = info.Id;
         parent.AddChild(video);
         return video;
+    }
+
+    private Video? ResolveVideo(FileSystemMetadata file, Folder parent)
+    {
+        var arguments = new object?[ResolvePathMethod.GetParameters().Length];
+        Array.Fill(arguments, Type.Missing);
+        arguments[0] = file;
+        arguments[1] = parent;
+        try
+        {
+            return ResolvePathMethod.Invoke(library, arguments) as Video;
+        }
+        catch (TargetInvocationException ex) when (ex.InnerException is not null)
+        {
+            ExceptionDispatchInfo.Throw(ex.InnerException);
+            throw;
+        }
     }
     public MediaAsset Resolve(string owner, string id, string secret)
     {
