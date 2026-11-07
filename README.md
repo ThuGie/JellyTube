@@ -8,7 +8,7 @@ A standalone Jellyfin plugin for YouTube discovery, private saved collections, m
 
 The plugin runs extraction and downloads inside .NET with its bundled managed YoutubeExplode library. **No yt-dlp, youtube-dl, Python, Node, Deno, sidecar, container, or additional service is needed on your NAS.** The archive contains two managed DLLs and metadata/documentation, with no architecture-specific executable or native library.
 
-Streaming uses a generated DASH manifest with indexed byte ranges for separate audio/video tracks. Jellyfin's own configured FFmpeg can remux or transcode for the client. Retained downloads use that same encoder to merge tracks without re-encoding. The Synology Jellyfin package must already provide a working FFmpeg; JellyTube never installs or replaces it.
+Streaming passes through a compatible combined MP4 when YouTube provides one at comparable quality with the selected audio. Otherwise JellyTube serves separate tracks through DASH. Jellyfin's configured FFmpeg can remux or transcode for the client. Retained downloads use that same encoder to merge tracks without re-encoding. The Synology Jellyfin package must already provide a working FFmpeg. JellyTube never installs or replaces it.
 
 ## Install from the Jellyfin catalog
 

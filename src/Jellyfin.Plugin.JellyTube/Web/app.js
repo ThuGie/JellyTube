@@ -81,7 +81,7 @@
       if (account() !== scope) return;
       const player = document.querySelector('video');
       if (!player?.currentSrc || player.ended) return;
-      const item = await api(`Videos/${video.id}/Prepare`, 'POST');
+      const item = await api(`Videos/${video.id}/Prepare?warm=false`, 'POST');
       if (item?.itemId) await nativePlay([item.itemId], 0, true, scope);
     }
   }

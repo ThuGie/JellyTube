@@ -8,6 +8,15 @@ namespace JellyTube.Tests;
 public sealed class CoreTests : IDisposable
 {
     [Theory]
+    [InlineData("Spanish (US) original", false, "", 4)]
+    [InlineData("Spanish (US)", false, "?xtags=lang%3Des%3Aacont%3Doriginal", 4)]
+    [InlineData("English (US)", true, "", 3)]
+    [InlineData("English (US)", true, "?xtags=lang%3Den%3Aacont%3Ddubbed", 1)]
+    [InlineData("Spanish original audio description", true, "", 0)]
+    [InlineData(null, null, "", 2)]
+    public void OriginalAudioOutranksLocalizedDefaults(string? name, bool? isDefault, string query, int expected) =>
+        Assert.Equal(expected, Extractor.AudioPreference(name, isDefault, "https://media.googlevideo.com/videoplayback" + query));
+    [Theory]
     [InlineData("music", "I built a garden shed", false)]
     [InlineData("music", "Building a shed with relaxing music", false)]
     [InlineData("music", "Live acoustic concert", true)]

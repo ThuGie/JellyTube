@@ -25,19 +25,15 @@ public sealed class MediaController(Store store, NativeLibrary native, Extractor
             return Redirect(Plugin.Instance.Configuration.PublicBaseUrl.TrimEnd('/') + "/JellyTube/Media/" + owner + "/" + id + "/" + secret + "/local.mp4");
         var seconds = asset.Video.DurationSeconds;
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
-        var resolution = extractor.ResolveAdaptive(id, height, ct);
-        if (seconds is null or <= 0)
-        {
-            var details = extractor.Details(id, ct);
-            await Task.WhenAll(resolution, details);
-            seconds = (await details).DurationSeconds;
-        }
-        if (seconds is null or <= 0) throw new ProviderException("Live or unknown-duration videos are not supported in this preview.");
         var prefix = Plugin.Instance.Configuration.PublicBaseUrl.TrimEnd('/') + "/JellyTube/Media/" + owner + "/" + id + "/" + secret + "/";
-        var source = await resolution;
+        var source = await extractor.ResolvePlayback(id, height, ct);
+        if (source.Progressive is { } progressive)
+            return Redirect(prefix + "progressive.mp4?identity=" + progressive.Identity);
+        if (seconds is null or <= 0) seconds = (await extractor.Details(id, ct)).DurationSeconds;
+        if (seconds is null or <= 0) throw new ProviderException("Live or unknown-duration videos are not supported in this preview.");
         logger.LogInformation("JellyTube media request {Reference} prepared the streaming manifest in {ResolutionMs:F0} ms.",
             HttpContext.TraceIdentifier, System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds);
-        var xml = ManifestXml(source, seconds.Value, prefix, height);
+        var xml = ManifestXml(source.Adaptive!, seconds.Value, prefix, height);
         return Content(xml, "application/dash+xml");
     }
     internal static string ManifestXml(AdaptiveSource source, double seconds, string prefix, int height = 720)
@@ -75,20 +71,25 @@ public sealed class MediaController(Store store, NativeLibrary native, Extractor
         Response.Headers.CacheControl = "private, no-store";
         return File(local, "video/mp4", enableRangeProcessing: true);
     }
-    [HttpGet("{track:regex(^(video|audio)$)}.mp4"), HttpHead("{track:regex(^(video|audio)$)}.mp4")]
+    [HttpGet("{track:regex(^(video|audio|progressive)$)}.mp4"), HttpHead("{track:regex(^(video|audio|progressive)$)}.mp4")]
     public async Task Stream(string owner, string id, string secret, string track, [FromQuery] int? height, [FromQuery] string? identity, CancellationToken ct)
     {
         native.Resolve(owner, id, secret); var selectedHeight = owner == NativeLibrary.SharedOwner ? SharedStreamHeight : height ?? Height(owner);
         if (selectedHeight is not (360 or 480 or 720 or 1080 or 1440 or 2160)) throw new System.ComponentModel.DataAnnotations.ValidationException("Invalid media quality.");
-        using var transport = await cache.Enter(ct);
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct); deadline.CancelAfter(TimeSpan.FromMinutes(30));
         for (var attempt = 0; attempt < 2; attempt++)
         {
-            var source = await extractor.ResolveAdaptive(id, selectedHeight, deadline.Token); var selected = track == "video" ? source.Video : source.Audio;
-            if (!Extractor.AllowedMediaUri(selected.Url)) throw new ProviderException("Invalid upstream media host.");
-            var fingerprint = Fingerprint(selected);
+            var source = await extractor.ResolvePlayback(id, selectedHeight, deadline.Token);
+            var adaptive = track == "video" ? source.Adaptive?.Video : source.Adaptive?.Audio;
+            var progressive = track == "progressive" ? source.Progressive : null;
+            if (track == "progressive" ? progressive is null : adaptive is null)
+                throw new ProviderException("The upstream media format changed. Restart playback to refresh it.");
+            var url = progressive?.Url ?? adaptive!.Url;
+            var size = progressive?.Size ?? adaptive!.Size;
+            if (!Extractor.AllowedMediaUri(url)) throw new ProviderException("Invalid upstream media host.");
+            var fingerprint = progressive?.Identity ?? Fingerprint(adaptive!);
             if (identity is not null && identity != fingerprint) throw new ProviderException("The upstream media format changed. Restart playback to refresh it.");
-            using var request = new HttpRequestMessage(HttpMethod.Get, selected.Url);
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
             if (Request.Headers.Range.Count > 0)
             {
                 if (!System.Net.Http.Headers.RangeHeaderValue.TryParse(Request.Headers.Range.ToString(), out var range) || range.Unit != "bytes" || range.Ranges.Count != 1)
@@ -102,29 +103,40 @@ public sealed class MediaController(Store store, NativeLibrary native, Extractor
                 ? await cache.EnterFill(cacheKey, deadline.Token) : null;
             if (single?.From is { } from && single.To is { } to && to >= from && cache.Get(cacheKey) is { } cached)
             {
-                Response.StatusCode = 206; Response.ContentType = track == "video" ? "video/mp4" : "audio/mp4";
+                Response.StatusCode = 206; Response.ContentType = track == "audio" ? "audio/mp4" : "video/mp4";
                 Response.Headers.CacheControl = "private, no-store"; Response.Headers.AcceptRanges = "bytes";
-                Response.Headers.ContentRange = $"bytes {from}-{to}/{selected.Size}"; Response.ContentLength = cached.Length;
+                Response.Headers.ContentRange = $"bytes {from}-{to}/{size}"; Response.ContentLength = cached.Length;
                 if (!HttpMethods.IsHead(Request.Method)) await Response.Body.WriteAsync(cached, ct); return;
             }
+            using var transport = await cache.Enter(deadline.Token);
             using var response = await http.CreateClient("JellyTube.Media").SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
             if (response.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.Gone && attempt == 0)
             { extractor.InvalidateAdaptive(id, selectedHeight); continue; }
             if (response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable) { Response.StatusCode = 416; return; }
             if (response.StatusCode is not (HttpStatusCode.OK or HttpStatusCode.PartialContent)) throw new ProviderException("YouTube could not serve this media range. Retry playback.");
-            Response.StatusCode = (int)response.StatusCode; Response.ContentType = track == "video" ? "video/mp4" : "audio/mp4";
+            Response.StatusCode = (int)response.StatusCode; Response.ContentType = track == "audio" ? "audio/mp4" : "video/mp4";
             Response.Headers.CacheControl = "private, no-store"; Response.Headers.AcceptRanges = "bytes";
             if (response.Content.Headers.ContentRange is { } contentRange) Response.Headers.ContentRange = contentRange.ToString();
             Response.ContentLength = response.Content.Headers.ContentLength;
             if (HttpMethods.IsHead(Request.Method)) return;
+            await using var input = await response.Content.ReadAsStreamAsync(deadline.Token);
             if (response.StatusCode == HttpStatusCode.PartialContent && single?.From is { } first && single.To is { } last
                 && fill is not null && response.Content.Headers.ContentLength == last - first + 1
-                && response.Content.Headers.ContentRange is { } returnedRange && returnedRange.From == first && returnedRange.To == last && returnedRange.Length == selected.Size)
+                && response.Content.Headers.ContentRange is { } returnedRange && returnedRange.From == first && returnedRange.To == last && returnedRange.Length == size)
             {
-                var bytes = await response.Content.ReadAsByteArrayAsync(deadline.Token); cache.Put(cacheKey, bytes);
-                await Response.Body.WriteAsync(bytes, ct); return;
+                var bytes = new byte[(int)(last - first + 1)];
+                var offset = 0;
+                while (offset < bytes.Length)
+                {
+                    var read = await input.ReadAsync(bytes.AsMemory(offset, Math.Min(64 * 1024, bytes.Length - offset)), deadline.Token);
+                    if (read == 0) throw new IOException("The upstream media range ended early.");
+                    await Response.Body.WriteAsync(bytes.AsMemory(offset, read), deadline.Token);
+                    if (offset == 0) await Response.Body.FlushAsync(deadline.Token);
+                    offset += read;
+                }
+                cache.Put(cacheKey, bytes);
+                return;
             }
-            await using var input = await response.Content.ReadAsStreamAsync(deadline.Token);
             await input.CopyToAsync(Response.Body, deadline.Token); return;
         }
     }

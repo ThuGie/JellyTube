@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using YoutubeExplode;
 using YoutubeExplode.Videos.Streams;
 
@@ -14,14 +15,16 @@ public sealed class Extractor
     private readonly SemaphoreSlim _slots = new(2);
     private readonly ConcurrentDictionary<string, Lazy<Task<ExtractedSource>>> _pending = new();
     private readonly ConcurrentDictionary<string, ExtractedSource> _cache = new();
-    private readonly ConcurrentDictionary<string, Lazy<Task<AdaptiveSource>>> _adaptivePending = new();
-    private readonly ConcurrentDictionary<string, AdaptiveSource> _adaptiveCache = new();
+    private readonly ConcurrentDictionary<string, Lazy<Task<PlaybackSource>>> _adaptivePending = new();
+    private readonly ConcurrentDictionary<string, PlaybackSource> _adaptiveCache = new();
     private readonly ConcurrentDictionary<string, (DateTimeOffset Expires, CatalogPage Page)> _uploads = new();
     private readonly ConcurrentDictionary<string, (DateTimeOffset Expires, VideoInfo Video)> _details = new();
     private readonly IHttpClientFactory _http;
     private readonly SegmentCache _segments;
-    public Extractor(IHttpClientFactory http, SegmentCache segments) { _http = http; _segments = segments; _youtube = new(http.CreateClient("JellyTube.YouTube")); }
-    public async Task<AdaptiveSource> ResolveAdaptive(string id, int maxHeight, CancellationToken ct)
+    private readonly ILogger<Extractor> _logger;
+    public Extractor(IHttpClientFactory http, SegmentCache segments, ILogger<Extractor> logger)
+    { _http = http; _segments = segments; _logger = logger; _youtube = new(http.CreateClient("JellyTube.YouTube")); }
+    public async Task<PlaybackSource> ResolvePlayback(string id, int maxHeight, CancellationToken ct)
     {
         Rules.VideoId(id); var key = id + ":" + maxHeight;
         if (_adaptiveCache.TryGetValue(key, out var cached) && cached.ExpiresAt > DateTimeOffset.UtcNow.AddMinutes(1)) return cached;
@@ -32,34 +35,61 @@ public sealed class Extractor
             if (_adaptiveCache.Count >= 200) foreach (var old in _adaptiveCache.OrderBy(x => x.Value.ExpiresAt).Take(50)) _adaptiveCache.TryRemove(old.Key, out _);
             _adaptiveCache[key] = source; return source;
         }
-        finally { if (pending.IsValueCreated && pending.Value.IsCompleted) _adaptivePending.TryRemove(new KeyValuePair<string, Lazy<Task<AdaptiveSource>>>(key, pending)); }
+        finally { if (pending.IsValueCreated && pending.Value.IsCompleted) _adaptivePending.TryRemove(new KeyValuePair<string, Lazy<Task<PlaybackSource>>>(key, pending)); }
     }
     public void InvalidateAdaptive(string id, int height) => _adaptiveCache.TryRemove(id + ":" + height, out _);
     internal async Task WarmAdaptive(string id, int height)
     {
-        try { await ResolveAdaptive(id, height, CancellationToken.None); }
+        try { await ResolvePlayback(id, height, CancellationToken.None); }
         catch (Exception ex) when (ex is ProviderException or OperationCanceledException)
         {
             // Preparation is best effort. The manifest request can retry and report playback errors.
         }
     }
-    private async Task<AdaptiveSource> AdaptiveCore(string id, int height)
+    private async Task<PlaybackSource> AdaptiveCore(string id, int height)
     {
+        var queued = System.Diagnostics.Stopwatch.GetTimestamp();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
         await _slots.WaitAsync(timeout.Token);
         try
         {
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
             var manifest = await _youtube.Videos.Streams.GetManifestAsync(id, timeout.Token);
+            var indexing = System.Diagnostics.Stopwatch.GetTimestamp();
             var video = manifest.GetVideoOnlyStreams().Where(s => s.Container.Name == "mp4" && s.VideoResolution.Height <= height)
                 .OrderByDescending(s => s.VideoCodec.StartsWith("avc", StringComparison.OrdinalIgnoreCase))
-                .ThenByDescending(s => s.VideoResolution.Height).ThenByDescending(s => s.Bitrate).FirstOrDefault()
-                ?? throw new ProviderException("No supported adaptive video format is available.");
-            var audio = manifest.GetAudioOnlyStreams().Where(s => s.Container.Name == "mp4").OrderByDescending(s => s.Bitrate).FirstOrDefault()
-                ?? throw new ProviderException("No supported adaptive audio format is available.");
+                .ThenByDescending(s => s.VideoQuality.Framerate is > 0 and <= 30)
+                .ThenByDescending(s => s.VideoResolution.Height).ThenByDescending(s => s.Bitrate).FirstOrDefault();
+            var audio = PreferOriginalAudio(manifest.GetAudioOnlyStreams().Where(s => s.Container.Name == "mp4"))
+                .ThenByDescending(s => s.Bitrate).FirstOrDefault();
+            var progressive = PreferOriginalAudio(manifest.GetMuxedStreams().Where(s => s.Container.Name == "mp4"
+                    && s.VideoCodec.StartsWith("avc", StringComparison.OrdinalIgnoreCase)
+                    && s.AudioCodec.StartsWith("mp4a", StringComparison.OrdinalIgnoreCase)
+                    && s.VideoResolution.Height <= height && s.Size.Bytes > 0 && AllowedMediaUri(s.Url)
+                    && (video is null || audio is null || (s.VideoResolution.Height >= video.VideoResolution.Height
+                        && (video.VideoQuality.Framerate > 30 || s.VideoQuality.Framerate is > 0 and <= 30)))
+                    && (audio is null || CompatibleAudio(s, audio))))
+                .ThenByDescending(s => s.VideoQuality.Framerate is > 0 and <= 30)
+                .ThenByDescending(s => s.VideoResolution.Height).ThenByDescending(s => s.Bitrate).FirstOrDefault();
+            var expires = DateTimeOffset.UtcNow.AddMinutes(5);
+            if (progressive is not null)
+            {
+                var identity = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(
+                    $"{progressive.Size.Bytes}|{progressive.VideoCodec}|{progressive.AudioCodec}|{progressive.AudioLanguage?.Name}|{progressive.VideoResolution}")))[..24];
+                _logger.LogInformation("JellyTube selected an unchanged MP4 in {FormatsMs:F0} ms. Audio language {Language}.",
+                    System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds, progressive.AudioLanguage?.Code ?? "unknown");
+                return new(null, new(progressive.Url, progressive.Size.Bytes, identity), expires);
+            }
+            if (video is null || audio is null) throw new ProviderException("No supported audio and video combination is available.");
             var videoIndex = IndexTrack(id, "video", video, video.VideoCodec, video.VideoResolution.Width, video.VideoResolution.Height, timeout.Token);
             var audioIndex = IndexTrack(id, "audio", audio, audio.AudioCodec, 0, 0, timeout.Token);
             await Task.WhenAll(videoIndex, audioIndex);
-            return new(await videoIndex, await audioIndex, DateTimeOffset.UtcNow.AddMinutes(5));
+            _logger.LogInformation("JellyTube stream lookup waited {QueueMs:F0} ms for capacity, resolved YouTube formats in {FormatsMs:F0} ms, and read media indexes in {IndexMs:F0} ms. Audio language {Language}, original marker {Original}.",
+                System.Diagnostics.Stopwatch.GetElapsedTime(queued, started).TotalMilliseconds,
+                System.Diagnostics.Stopwatch.GetElapsedTime(started, indexing).TotalMilliseconds,
+                System.Diagnostics.Stopwatch.GetElapsedTime(indexing).TotalMilliseconds,
+                audio.AudioLanguage?.Code ?? "unknown", AudioPreference(audio.AudioLanguage?.Name, audio.IsAudioLanguageDefault, audio.Url) == 4);
+            return new(new(await videoIndex, await audioIndex, expires), null, expires);
         }
         catch (Exception ex) when (ex is not (ProviderException or OperationCanceledException))
         { throw new ProviderException("Managed YouTube extraction failed. The video may be restricted or the extractor needs an update."); }
@@ -114,8 +144,8 @@ public sealed class Extractor
         try
         {
             var manifest = await _youtube.Videos.Streams.GetManifestAsync(id, timeout.Token);
-            var stream = manifest.GetMuxedStreams().Where(s => s.VideoResolution.Height <= height)
-                .OrderByDescending(s => s.Container.Name == "mp4").ThenByDescending(s => s.VideoQuality.MaxHeight).FirstOrDefault();
+            var stream = PreferOriginalAudio(manifest.GetMuxedStreams().Where(s => s.VideoResolution.Height <= height))
+                .ThenByDescending(s => s.Container.Name == "mp4").ThenByDescending(s => s.VideoQuality.MaxHeight).FirstOrDefault();
             if (stream is null) throw new ProviderException("No combined stream is available. Download prepares separate audio/video tracks as a native local copy.");
             if (!AllowedMediaUri(stream.Url)) throw new ProviderException("The provider returned an unsupported media destination.");
             return new(stream.Url, new(), stream.Container.Name, stream.VideoCodec, stream.AudioCodec,
@@ -128,6 +158,36 @@ public sealed class Extractor
     internal static bool AllowedMediaUri(string value) => Uri.TryCreate(value, UriKind.Absolute, out var uri)
         && uri.Scheme == "https" && uri.Port == 443 && string.IsNullOrEmpty(uri.UserInfo)
         && uri.Host.EndsWith(".googlevideo.com", StringComparison.OrdinalIgnoreCase);
+
+    internal static int AudioPreference(string? name, bool? isDefault, string url)
+    {
+        var tags = Uri.TryCreate(url, UriKind.Absolute, out var uri)
+            && Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(uri.Query).TryGetValue("xtags", out var value)
+            ? value.ToString().Split(':')
+            : [];
+        var label = name ?? "";
+        if (label.Contains("audio description", StringComparison.OrdinalIgnoreCase)
+            || label.Contains("descriptive", StringComparison.OrdinalIgnoreCase)
+            || tags.Contains("acont=descriptive", StringComparer.OrdinalIgnoreCase)) return 0;
+        if (tags.Contains("acont=original", StringComparer.OrdinalIgnoreCase)
+            || System.Text.RegularExpressions.Regex.IsMatch(label, @"\boriginal\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase
+                | System.Text.RegularExpressions.RegexOptions.CultureInvariant)) return 4;
+        if (tags.Contains("acont=dubbed", StringComparer.OrdinalIgnoreCase)
+            || label.Contains("dubbed", StringComparison.OrdinalIgnoreCase)) return 1;
+        return isDefault == true ? 3 : 2;
+    }
+
+    private static bool CompatibleAudio(IAudioStreamInfo combined, IAudioStreamInfo separate)
+    {
+        var combinedRank = AudioPreference(combined.AudioLanguage?.Name, combined.IsAudioLanguageDefault, combined.Url);
+        var separateRank = AudioPreference(separate.AudioLanguage?.Name, separate.IsAudioLanguageDefault, separate.Url);
+        return combinedRank >= separateRank && (separate.AudioLanguage is null
+            || string.Equals(combined.AudioLanguage?.Code, separate.AudioLanguage?.Code, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static IOrderedEnumerable<T> PreferOriginalAudio<T>(IEnumerable<T> streams) where T : IAudioStreamInfo =>
+        streams.OrderByDescending(stream => AudioPreference(stream.AudioLanguage?.Name, stream.IsAudioLanguageDefault, stream.Url))
+            .ThenByDescending(stream => stream.AudioCodec.StartsWith("mp4a", StringComparison.OrdinalIgnoreCase));
     public async Task<VideoInfo> Details(string id, CancellationToken ct)
     {
         Rules.VideoId(id);
@@ -239,7 +299,8 @@ public sealed class Extractor
             var v = manifest.GetVideoOnlyStreams().Where(s => s.VideoResolution.Height <= height && s.Container.Name == "mp4")
                 .OrderByDescending(s => s.VideoCodec.StartsWith("avc", StringComparison.OrdinalIgnoreCase))
                 .ThenByDescending(s => s.VideoResolution.Height).ThenByDescending(s => s.Bitrate).FirstOrDefault();
-            var a = manifest.GetAudioOnlyStreams().Where(s => s.Container.Name == "mp4").OrderByDescending(s => s.Bitrate).FirstOrDefault();
+            var a = PreferOriginalAudio(manifest.GetAudioOnlyStreams().Where(s => s.Container.Name == "mp4"))
+                .ThenByDescending(s => s.Bitrate).FirstOrDefault();
             if (v is not null && a is not null)
             {
                 if (!AllowedMediaUri(v.Url) || !AllowedMediaUri(a.Url)) throw new ProviderException("The provider returned an unsupported download destination.");
@@ -253,8 +314,8 @@ public sealed class Extractor
             }
             else
             {
-                var combined = manifest.GetMuxedStreams().Where(s => s.VideoResolution.Height <= height && s.Container.Name == "mp4")
-                    .OrderByDescending(s => s.VideoQuality.MaxHeight).FirstOrDefault() ?? throw new ProviderException("No compatible formats are available.");
+                var combined = PreferOriginalAudio(manifest.GetMuxedStreams().Where(s => s.VideoResolution.Height <= height && s.Container.Name == "mp4"))
+                    .ThenByDescending(s => s.VideoQuality.MaxHeight).FirstOrDefault() ?? throw new ProviderException("No compatible formats are available.");
                 if (!AllowedMediaUri(combined.Url)) throw new ProviderException("The provider returned an unsupported download destination.");
                 if (combined.Size.Bytes > 8L * 1024 * 1024 * 1024) throw new ProviderException("This download exceeds the 8 GiB item limit.");
                 await _youtube.Videos.Streams.DownloadAsync(combined, Path.Combine(directory, "video.mp4"), new InlineProgress(p => report?.Invoke(p * .95, "Downloading video")), ct);
