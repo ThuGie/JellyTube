@@ -173,6 +173,14 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
     [HttpGet("Me/Recommendations/Topics")]
     public async Task<ActionResult> TopicRecommendations(CancellationToken ct) =>
         Ok(await catalog.RecommendTopics(Owner(), ct));
+    [HttpGet("Explore")]
+    public async Task<ActionResult> Explore([FromQuery] string topic, [FromQuery] string? page, CancellationToken ct)
+    {
+        var owner = Owner();
+        var result = await catalog.Explore(owner, topic, page, ct);
+        foreach (var video in result.Items) store.Put(owner, "video", video.Id, video);
+        return Ok(result);
+    }
     [HttpDelete("Me/{kind:regex(^(Favorites|WatchLater)$)}/{id}")]
     public async Task<ActionResult> Unsave(string kind, string id, CancellationToken ct)
     {

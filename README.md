@@ -34,6 +34,7 @@ YouTube API credentials are optional. Managed discovery supports video, channel 
 ## Included
 
 - Video, channel and public-playlist search; direct video-ID/link lookup.
+- Home feeds for recommendations, followed channels, topic discovery, Continue Watching, Watch Later, and Favorites. For You blends multiple interests with discovery and offers more results as you browse.
 - Per-user favorites, Watch Later, named ordered playlists, followed channels, and recent channel uploads.
 - Native video playback with separate audio/video ranges, format-aware source refresh, a bounded range cache and seekable segment timelines.
 - Personal quality caps, layout, search preferences, recent-viewing preference and web queue preference.

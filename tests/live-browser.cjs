@@ -11,11 +11,33 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
     for (const [name, width, height] of [['desktop', 1440, 1000], ['mobile', 390, 844]]) {
       const page = await browser.newPage({ viewport: { width, height } }); page.setDefaultTimeout(20000);
       const errors = []; page.on('pageerror', e => errors.push(e.message));
+      if (name === 'desktop') {
+        const items = Array.from({ length: 36 }, (_, index) => ({
+          id: 'feed' + String(index).padStart(7, '0'), title: 'Recommendation ' + index,
+          channel: 'Creator ' + index % 12, channelId: 'creator-' + index % 12, durationSeconds: 600,
+          publishedAt: '2026-01-01', description: 'A video from the recommendation fixture.'
+        }));
+        await page.route('**/JellyTube/Me/Recommendations/Topics', route => route.fulfill({ json: { items } }));
+        await page.route('**/JellyTube/Explore?topic=*', route => {
+          const topic = new URL(route.request().url()).searchParams.get('topic');
+          return route.fulfill({ json: { items: [{ ...items[0], title: topic + ' discovery' }] } });
+        });
+      }
       await page.goto(s.base + '/web/');
       await page.locator('#txtManualName').fill('tube-alice'); await page.locator('#txtManualPassword').fill(s.password); await page.locator('#txtManualPassword').press('Enter');
       await page.locator('#jt-launch').waitFor(); await page.locator('#jt-launch').click();
       await page.getByRole('heading', { name: 'YouTube', exact: true }).waitFor();
       const feeds = page.getByRole('navigation', { name: 'Home feeds' });
+      if (name === 'desktop') {
+        await page.locator('.jt-card').nth(23).waitFor();
+        await page.getByRole('button', { name: 'Load more', exact: true }).click();
+        await page.locator('.jt-card').nth(24).waitFor();
+        await feeds.getByRole('button', { name: 'Explore', exact: true }).click();
+        await page.getByRole('navigation', { name: 'Explore topics' }).getByRole('button', { name: 'Gaming', exact: true }).click();
+        await page.getByText('gaming discovery', { exact: true }).waitFor();
+        await feeds.getByRole('button', { name: 'Watch later', exact: true }).click();
+        assert.equal(await feeds.getByRole('button', { name: 'Watch later', exact: true }).getAttribute('aria-pressed'), 'true');
+      }
       await feeds.getByRole('button', { name: 'Following', exact: true }).click();
       assert.equal(await feeds.getByRole('button', { name: 'Following', exact: true }).getAttribute('aria-pressed'), 'true');
       await feeds.getByRole('button', { name: 'For you', exact: true }).click();

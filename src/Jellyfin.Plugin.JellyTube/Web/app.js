@@ -503,7 +503,12 @@
     main.append(button('Back', back));
     await browseVideos('Playlists/' + encodeURIComponent(id) + '/Videos');
   }
-  let homeFeed = 'for-you', homeFormat = 'videos';
+  const exploreTopics = [
+    ['technology', 'Technology'], ['science', 'Science & nature'], ['music', 'Music'],
+    ['gaming', 'Gaming'], ['food', 'Food'], ['travel', 'Travel'], ['sports', 'Sports']
+  ];
+  const dailyTopic = () => exploreTopics[Math.floor(Date.now() / 86400000) % exploreTopics.length][0];
+  let homeFeed = 'for-you', homeFormat = 'videos', exploreTopic;
   async function renderHome() {
     heading('YouTube');
     if (!session.nativeLibrary) message('Ask an administrator to set up the shared JellyTube library for playback.');
@@ -511,70 +516,136 @@
     nav.setAttribute('aria-label', 'Home feeds');
     const feed = el('div');
     const hint = el('p', 'jt-small', 'Shorts include videos up to 3 minutes when YouTube does not provide a format label.');
-    hint.hidden = homeFormat !== 'shorts';
     const formats = formatTabs(homeFormat, value => {
       homeFormat = value;
-      hint.hidden = value !== 'shorts';
       return load(homeFeed);
     });
-    main.append(nav, formats, hint, feed);
-    const version = generation;
-    const uploads = new Map();
-    function channelUploads(id) {
-      if (!uploads.has(id)) uploads.set(id, api('Channels/' + encodeURIComponent(id) + '/Uploads'));
-      return uploads.get(id);
+    const topics = el('nav', 'jt-feed-tabs');
+    topics.setAttribute('aria-label', 'Explore topics');
+    for (const [id, title] of exploreTopics) {
+      const control = button(title, () => { exploreTopic = id; return load('explore'); });
+      control.dataset.topic = id;
+      topics.append(control);
+    }
+    main.append(nav, topics, formats, hint, feed);
+    const pageStatus = status;
+    const pages = new Map();
+    function cachedPage(path) {
+      if (!pages.has(path)) pages.set(path, api(path).catch(error => { pages.delete(path); throw error; }));
+      return pages.get(path);
     }
     const history = session.settings.recordHistory ? library.history : [];
     const resume = history.filter(entry => entry.positionSeconds > 5
       && (!entry.video.durationSeconds || entry.positionSeconds < entry.video.durationSeconds - 10));
     const watched = new Set(history.map(entry => entry.video.id));
-    const followed = library.channels.slice(0, 8).map(entry => entry.channel.id);
+    const followed = library.channels.slice(0, 12).map(entry => entry.channel.id);
     const watchedChannels = [...new Set(history.map(entry => entry.video.channelId).filter(Boolean))].slice(0, 4);
+    const channelPath = id => 'Channels/' + encodeURIComponent(id) + '/Uploads';
+    const explorePath = topic => 'Explore?topic=' + encodeURIComponent(topic);
     let request = 0;
     async function load(kind) {
       homeFeed = kind;
       const revision = ++request;
+      const isCurrent = () => status === pageStatus && request === revision;
+      const topic = exploreTopic || dailyTopic();
       for (const control of nav.children) control.setAttribute('aria-pressed', String(control.dataset.feed === kind));
+      for (const control of topics.children) control.setAttribute('aria-pressed', String(control.dataset.topic === topic));
+      const saved = ['continue', 'later', 'favorites'].includes(kind);
+      topics.hidden = kind !== 'explore';
+      formats.hidden = saved;
+      hint.hidden = saved || homeFormat !== 'shorts';
+      if (saved) {
+        const videos = kind === 'continue' ? resume : library[kind === 'later' ? 'watchLater' : 'favorites'];
+        feed.replaceChildren();
+        if (videos.length) grid(videos.map(entry => entry.video), feed, false, false);
+        else feed.append(el('p', 'jt-empty', kind === 'continue'
+          ? 'Videos you pause partway through appear here when history is enabled.'
+          : 'Save a video to see it here.'));
+        return;
+      }
       const loading = el('p', 'jt-small', 'Loading videos…');
       loading.setAttribute('role', 'status');
       feed.replaceChildren(loading);
-      formats.hidden = kind === 'continue';
-      hint.hidden = kind === 'continue' || homeFormat !== 'shorts';
-      if (kind === 'continue') {
-        feed.replaceChildren();
-        if (resume.length) grid(resume.map(entry => entry.video), feed, false, false);
-        else feed.append(el('p', 'jt-empty', 'Videos you pause partway through will appear here when history is enabled.'));
-        return;
-      }
-      const channels = kind === 'following' ? followed : [...new Set([...followed, ...watchedChannels])];
-      const topics = kind === 'for-you' && history.length
-        ? api('Me/Recommendations/Topics').catch(() => ({ items: [] })) : Promise.resolve({ items: [] });
-      const [results, recommendations] = await Promise.all([Promise.allSettled(channels.map(channelUploads)), topics]);
-      if (version !== generation || request !== revision) return;
-      const lists = results.map(result => result.value?.items || []);
-      const seen = new Set(kind === 'for-you' ? watched : []);
-      const picks = [];
-      for (let index = 0; index < 20 && picks.length < 24; index++) {
-        for (const list of kind === 'for-you' ? [recommendations.items, ...lists] : lists) {
-          const video = list[index];
-          if (video && !!isShortVideo(video) === (homeFormat === 'shorts') && !seen.has(video.id)) { seen.add(video.id); picks.push(video); }
-          if (picks.length === 24) break;
+      const paths = kind === 'explore' ? [explorePath(topic)] : kind === 'following'
+        ? followed.map(channelPath)
+        : ['Me/Recommendations/Topics', explorePath(dailyTopic()), ...[...new Set([...followed, ...watchedChannels])].map(channelPath)];
+      const results = await Promise.allSettled(paths.map(cachedPage));
+      if (!isCurrent()) return;
+      const sources = results.flatMap((result, index) => result.status === 'fulfilled'
+        ? [{ path: paths[index], items: result.value.items, next: result.value.nextPageToken }] : []);
+      const videos = [], seen = new Set(kind === 'for-you' ? watched : []);
+      const deferred = [];
+      const cards = el('div', 'jt-grid');
+      const more = button('Load more', async () => {
+        if (candidates().length < 24) {
+          const pageable = sources.filter(source => source.next).slice(0, 4);
+          const nextPages = await Promise.allSettled(pageable.map(source =>
+            cachedPage(source.path + (source.path.includes('?') ? '&' : '?') + 'page=' + encodeURIComponent(source.next))));
+          if (!isCurrent()) return;
+          nextPages.forEach((result, index) => {
+            if (result.status !== 'fulfilled') return;
+            const source = pageable[index];
+            source.items = [...source.items, ...result.value.items];
+            source.next = result.value.nextPageToken === source.next ? null : result.value.nextPageToken;
+          });
+          if (nextPages.length && nextPages.every(result => result.status === 'rejected') && !candidates().length)
+            throw new Error('More videos are temporarily unavailable. Try again.');
         }
+        append();
+      });
+      function candidates() {
+        const output = [], unique = new Set(seen);
+        const count = Math.max(0, ...sources.map(source => source.items.length));
+        for (let index = 0; index < count; index++) {
+          for (const { items } of sources) {
+            const video = items[index];
+            if (video && !!isShortVideo(video) === (homeFormat === 'shorts') && !unique.has(video.id)) {
+              unique.add(video.id);
+              output.push(video);
+            }
+          }
+        }
+        return output;
       }
-      feed.replaceChildren();
-      if (picks.length) {
-        grid(picks, feed, false, false);
-        return;
+      function append() {
+        const creators = new Map();
+        const available = candidates();
+        deferred.length = 0;
+        let added = 0;
+        for (const video of available) {
+          const creator = video.channelId || video.channel;
+          const count = creators.get(creator) || 0;
+          if (kind === 'for-you' && count >= 3) { deferred.push(video); continue; }
+          creators.set(creator, count + 1);
+          add(video);
+          if (++added === 24) break;
+        }
+        if (added < 12) for (const video of deferred.slice(0, 12 - added)) add(video);
+        more.hidden = !candidates().length && !sources.some(source => source.next);
+        if (videos.length) feed.querySelector('.jt-empty')?.remove();
       }
-      feed.append(el('p', 'jt-empty', channels.length
-        ? 'No videos are available in this feed right now.'
-        : 'Follow a channel to start building your feed.'));
-      feed.append(button('Find channels', () => {
-        searchState = { query: '', kind: 'channels', items: [], next: null };
-        return navigate('search');
-      }, 'jt-primary'));
+      function add(video) {
+        seen.add(video.id);
+        videos.push(video);
+        cards.append(card(video, videos));
+      }
+      feed.replaceChildren(cards, more);
+      append();
+      if (!videos.length) {
+        feed.prepend(el('p', 'jt-empty', results.length && !sources.length
+          ? 'This feed is temporarily unavailable.'
+          : kind === 'following' && !followed.length ? 'Follow a channel to see uploads here.' : 'No videos match this format yet.'));
+        if (kind === 'following' && !followed.length) feed.append(button('Find channels', () => {
+          searchState = { query: '', kind: 'channels', items: [], next: null };
+          return navigate('search');
+        }, 'jt-primary'));
+        else if (!sources.length) feed.append(button('Retry feed', () => load(kind)));
+      }
     }
-    for (const [id, title] of [['for-you', 'For you'], ['following', 'Following'], ['continue', 'Continue watching']]) {
+    for (const [id, title] of [
+      ['for-you', 'For you'], ['following', 'Following'], ['explore', 'Explore'],
+      ['continue', 'Continue watching'], ['later', 'Watch later'], ['favorites', 'Favorites']
+    ]) {
       const control = button(title, () => load(id));
       control.dataset.feed = id;
       nav.append(control);
@@ -701,7 +772,7 @@
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && root && !root.hidden && !root.querySelector('dialog[open]') && !root.classList.contains('jt-embedded')) close(); });
   function mount() {
     const scope = account();
-    if (lastUser && scope !== lastUser) { close(false); library = null; cardDetails.clear(); detailQueue.length = 0; homeFeed = 'for-you'; homeFormat = 'videos'; searchState = { query: '', kind: 'videos', items: [], next: null }; document.getElementById('jt-launch')?.remove(); }
+    if (lastUser && scope !== lastUser) { close(false); library = null; cardDetails.clear(); detailQueue.length = 0; homeFeed = 'for-you'; homeFormat = 'videos'; exploreTopic = undefined; searchState = { query: '', kind: 'videos', items: [], next: null }; document.getElementById('jt-launch')?.remove(); }
     lastUser = scope;
     updatePlaybackPage();
     if (document.getElementById('jt-launch') || typeof ApiClient === 'undefined' || !ApiClient.accessToken()) return;
