@@ -5,7 +5,7 @@
   "overview": "YouTube, inside Jellyfin",
   "owner": "ThuGie",
   "category": "General",
-  "version": "0.1.0.15",
+  "version": "0.1.0.16",
   "targetAbi": "10.11.3.0",
   "autoUpdate": true,
   "imagePath": "thumb.png",
@@ -14,6 +14,6 @@
     "YoutubeExplode.dll",
     "Jellyfin.Plugin.JellyTube.dll"
   ],
-  "timestamp": "2026-11-08T00:19:40Z",
-  "changelog": "- Put General first in the Home category row and select it by default.\n- Keep direct playback, resume, saved videos, and downloads private without adding native library items.\n- Exclude JellyTube's shared library from Recently Added and ask before adding a video for native playback."
+  "timestamp": "2026-11-08T00:30:39Z",
+  "changelog": "- Use complete YouTube MP4 formats from a bounded quick lookup and keep the full extractor as a fallback.\n- Reuse visitor data across requests while preserving original audio, resolution, and native playback compatibility."
 }

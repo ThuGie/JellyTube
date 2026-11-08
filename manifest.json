@@ -9,6 +9,15 @@
     "imageUrl": "https://raw.githubusercontent.com/ThuGie/JellyTube/main/assets/jellytube.png",
     "versions": [
       {
+        "version": "0.1.0.16",
+        "changelog": "- Use complete YouTube MP4 formats from a bounded quick lookup and keep the full extractor as a fallback.\n- Reuse visitor data across requests while preserving original audio, resolution, and native playback compatibility.",
+        "targetAbi": "10.11.3.0",
+        "sourceUrl": "https://github.com/ThuGie/JellyTube/releases/download/v0.1.0.16/JellyTube_0.1.0.16.zip",
+        "checksum": "1e120a64341b4af76f2b1c01d8ae752c",
+        "timestamp": "2026-11-08T00:30:39Z",
+        "dependencies": []
+      },
+      {
         "version": "0.1.0.15",
         "changelog": "- Put General first in the Home category row and select it by default.\n- Keep direct playback, resume, saved videos, and downloads private without adding native library items.\n- Exclude JellyTube's shared library from Recently Added and ask before adding a video for native playback.",
         "targetAbi": "10.11.3.0",
