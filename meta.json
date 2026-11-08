@@ -5,7 +5,7 @@
   "overview": "YouTube, inside Jellyfin",
   "owner": "ThuGie",
   "category": "General",
-  "version": "0.1.0.16",
+  "version": "0.1.0.17",
   "targetAbi": "10.11.3.0",
   "autoUpdate": true,
   "imagePath": "thumb.png",
@@ -14,6 +14,6 @@
     "YoutubeExplode.dll",
     "Jellyfin.Plugin.JellyTube.dll"
   ],
-  "timestamp": "2026-11-08T00:30:39Z",
-  "changelog": "- Use complete YouTube MP4 formats from a bounded quick lookup and keep the full extractor as a fallback.\n- Reuse visitor data across requests while preserving original audio, resolution, and native playback compatibility."
+  "timestamp": "2026-11-08T00:44:28Z",
+  "changelog": "- Add optional per-user YouTube sign-in and read-only subscription sync.\n- Use YouTube subscription uploads for connected For You and Following feeds and retain local recommendations for disconnected accounts."
 }
