@@ -9,6 +9,15 @@
     "imageUrl": "https://raw.githubusercontent.com/ThuGie/JellyTube/main/assets/jellytube.png",
     "versions": [
       {
+        "version": "0.1.0.18",
+        "changelog": "- Organize personal preferences and server setup into responsive settings sections.\n- Show YouTube connection status and add Google Cloud setup links and a copyable callback URL.",
+        "targetAbi": "10.11.3.0",
+        "sourceUrl": "https://github.com/ThuGie/JellyTube/releases/download/v0.1.0.18/JellyTube_0.1.0.18.zip",
+        "checksum": "4f6f93f8efca6e2318998cfcda0eaf32",
+        "timestamp": "2026-11-08T00:53:11Z",
+        "dependencies": []
+      },
+      {
         "version": "0.1.0.17",
         "changelog": "- Add optional per-user YouTube sign-in and read-only subscription sync.\n- Use YouTube subscription uploads for connected For You and Following feeds and retain local recommendations for disconnected accounts.",
         "targetAbi": "10.11.3.0",

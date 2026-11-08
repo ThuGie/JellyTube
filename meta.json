@@ -5,7 +5,7 @@
   "overview": "YouTube, inside Jellyfin",
   "owner": "ThuGie",
   "category": "General",
-  "version": "0.1.0.17",
+  "version": "0.1.0.18",
   "targetAbi": "10.11.3.0",
   "autoUpdate": true,
   "imagePath": "thumb.png",
@@ -14,6 +14,6 @@
     "YoutubeExplode.dll",
     "Jellyfin.Plugin.JellyTube.dll"
   ],
-  "timestamp": "2026-11-08T00:44:28Z",
-  "changelog": "- Add optional per-user YouTube sign-in and read-only subscription sync.\n- Use YouTube subscription uploads for connected For You and Following feeds and retain local recommendations for disconnected accounts."
+  "timestamp": "2026-11-08T00:53:11Z",
+  "changelog": "- Organize personal preferences and server setup into responsive settings sections.\n- Show YouTube connection status and add Google Cloud setup links and a copyable callback URL."
 }
