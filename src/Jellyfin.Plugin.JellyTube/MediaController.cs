@@ -14,7 +14,8 @@ public sealed class MediaController(Store store, NativeLibrary native, Extractor
     Microsoft.Extensions.Logging.ILogger<MediaController> logger) : ControllerBase
 {
     internal const int SharedStreamHeight = 1080;
-    private int Height(string owner) => owner == NativeLibrary.SharedOwner ? SharedStreamHeight : store.Settings(owner).MaxHeight;
+    private static bool HasSharedQuality(string owner) => owner == NativeLibrary.SharedOwner || owner.StartsWith(NativeLibrary.DirectPrefix, StringComparison.Ordinal);
+    private int Height(string owner) => HasSharedQuality(owner) ? SharedStreamHeight : store.Settings(owner).MaxHeight;
     [HttpGet("~/JellyTube/Thumbnails/{id}.jpg")]
     public async Task<ActionResult> Thumbnail(string id, CancellationToken ct)
     {
@@ -87,7 +88,7 @@ public sealed class MediaController(Store store, NativeLibrary native, Extractor
     [HttpGet("{track:regex(^(video|audio|progressive)$)}.mp4"), HttpHead("{track:regex(^(video|audio|progressive)$)}.mp4")]
     public async Task Stream(string owner, string id, string secret, string track, [FromQuery] int? height, [FromQuery] string? identity, CancellationToken ct)
     {
-        native.Resolve(owner, id, secret); var selectedHeight = owner == NativeLibrary.SharedOwner ? SharedStreamHeight : height ?? Height(owner);
+        native.Resolve(owner, id, secret); var selectedHeight = HasSharedQuality(owner) ? SharedStreamHeight : height ?? Height(owner);
         if (selectedHeight is not (360 or 480 or 720 or 1080 or 1440 or 2160)) throw new System.ComponentModel.DataAnnotations.ValidationException("Invalid media quality.");
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct); deadline.CancelAfter(TimeSpan.FromMinutes(30));
         for (var attempt = 0; attempt < 2; attempt++)

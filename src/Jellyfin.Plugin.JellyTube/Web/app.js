@@ -59,7 +59,7 @@
   async function play(video, sequence = [video]) {
     if (playbackReturn || preparing || directPlayer) return;
     if (!session.nativeLibrary) throw new Error('An administrator needs to set up the shared JellyTube library first.');
-    const scope = account(), version = generation, autoplay = session.settings.autoplay;
+    const scope = account(), version = generation;
     const request = new AbortController();
     preparing = request;
     const started = performance.now();
@@ -67,13 +67,18 @@
     const notice = playbackNotice('Preparing video…', () => request.abort('cancelled'));
     const timeout = setTimeout(() => request.abort('timeout'), 15000);
     try {
-      const result = await api(`Videos/${video.id}/Prepare`, 'POST', undefined, request.signal);
+      let result = await api(`Videos/${video.id}/Prepare`, 'POST', undefined, request.signal);
       if (request.signal.aborted || version !== generation || scope !== account()) return;
+      if (result.requiresNative) {
+        if (!confirm('Your Jellyfin settings require the native player. This will add the video to the shared JellyTube library. Continue?')) return;
+        result = await api(`Videos/${video.id}/Prepare?nativePlayback=true`, 'POST', undefined, request.signal);
+        if (request.signal.aborted || version !== generation || scope !== account()) return;
+      }
       if (result.directPlayback) {
         openDirectPlayer(video, sequence, result, scope, version, started, dashReady);
         return;
       }
-      await nativePlay([result.itemId], result.positionTicks || 0, false, scope, version, { ...result, started });
+      await nativePlay([result.itemId], result.positionTicks || 0, scope, version, { ...result, started });
     } catch (error) {
       if (version !== generation || scope !== account() || request.signal.reason === 'cancelled') return;
       if (request.signal.aborted) throw new Error('Jellyfin timed out while preparing the video. Try Play again.');
@@ -82,11 +87,6 @@
       clearTimeout(timeout);
       notice.remove();
       preparing = null;
-    }
-    if (autoplay) {
-      const index = sequence.findIndex(v => v.id === video.id), seen = new Set([video.id]);
-      const following = sequence.slice(index + 1).filter(v => !seen.has(v.id) && seen.add(v.id)).slice(0, 20);
-      queueFollowing(following, scope).catch(() => { /* Playback remains usable if the next item cannot be prepared. */ });
     }
   }
   function openDirectPlayer(info, sequence, result, scope, version, started, dashReady) {
@@ -124,11 +124,14 @@
       return saved;
     };
     const playNative = button('Play in Jellyfin', async () => {
+      if (!confirm('Play in Jellyfin adds this video to the shared JellyTube library. Continue?')) return;
       const position = played ? Math.round(video.currentTime * 10000000) : result.positionTicks || 0;
+      const nativeResult = await api(`Videos/${info.id}/Prepare?nativePlayback=true`, 'POST', undefined, request.signal);
+      if (!dialog.open || account() !== scope || generation !== version) return;
       dialog.close();
       await closeDirect();
       if (account() === scope && generation === version)
-        await nativePlay([result.itemId], position, false, scope, version, { ...result, started: performance.now() });
+        await nativePlay([nativeResult.itemId], position, scope, version, { ...nativeResult, started: performance.now() });
     });
     dialog.append(el('h2', '', info.title), video, statusLine, button('Back', () => dialog.close(), 'jt-primary'), playNative);
     dialog.addEventListener('close', closeDirect, { once: true });
@@ -179,20 +182,7 @@
       }
     }).catch(error => { if (!request.signal.aborted) fail(error); });
   }
-  async function queueFollowing(videos, scope) {
-    for (let attempt = 0; attempt < 50 && !document.querySelector('video')?.currentSrc; attempt++) {
-      if (account() !== scope) return;
-      await new Promise(r => setTimeout(r, 200));
-    }
-    for (const video of videos) {
-      if (account() !== scope) return;
-      const player = document.querySelector('video');
-      if (!player?.currentSrc || player.ended) return;
-      const item = await api(`Videos/${video.id}/Prepare?warm=false`, 'POST');
-      if (item?.itemId) await nativePlay([item.itemId], 0, true, scope);
-    }
-  }
-  async function nativePlay(ids, positionTicks = 0, queue = false, expectedScope = account(), expectedGeneration = generation, attempt = null) {
+  async function nativePlay(ids, positionTicks = 0, expectedScope = account(), expectedGeneration = generation, attempt = null) {
     // Jellyfin's registered item-action element works in the bundled web client without importing private webpack modules.
     const host = el('div'); host.hidden = true;
     // Jellyfin's customized-built-in polyfill expects declarative is= markup, not createElement's native options object.
@@ -200,7 +190,7 @@
     const container = host.firstElementChild;
     container.fetchData = () => ApiClient.getItems(ApiClient.getCurrentUserId(), { Ids: ids.join(','), Limit: ids.length, Fields: 'MediaSources', EnableTotalRecordCount: false });
     const action = el('button', 'itemAction'); action.type = 'button'; action.dataset.id = ids[0]; action.dataset.serverid = ApiClient.serverId();
-    action.dataset.type = action.dataset.mediatype = 'Video'; action.dataset.action = queue ? 'queueallfromhere' : positionTicks > 0 ? 'resume' : 'play'; action.dataset.positionticks = positionTicks;
+    action.dataset.type = action.dataset.mediatype = 'Video'; action.dataset.action = positionTicks > 0 ? 'resume' : 'play'; action.dataset.positionticks = positionTicks;
     container.append(action); host.append(container); document.body.append(host);
     // Allow Jellyfin's element-upgrade observer to attach its native item-action listeners.
     await new Promise(resolve => setTimeout(resolve, 0));
@@ -208,7 +198,6 @@
     const existingVideo = document.querySelector('video');
     const existingSource = existingVideo?.currentSrc;
     const event = new MouseEvent('click', { bubbles: true, cancelable: true }); action.dispatchEvent(event); host.remove();
-    if (queue) return;
     if (!event.defaultPrevented) throw new Error('Jellyfin’s player is unavailable. Refresh Jellyfin Web and try again.');
     if (playbackReturn) return;
     const pending = {
@@ -281,7 +270,7 @@
       pending.retried = true;
       pending.retryAt = performance.now();
       pending.notice.firstChild.textContent = 'The stream was interrupted. Retrying…';
-      nativePlay([attempt.itemId], attempt.positionTicks || 0, false, pending.scope).catch(() => {});
+      nativePlay([attempt.itemId], attempt.positionTicks || 0, pending.scope).catch(() => {});
     }
     const elapsed = performance.now() - attempt.started;
     if (elapsed > 180000 || (player?.error && player.error.code !== 2)
@@ -660,8 +649,8 @@
     });
     const topics = el('nav', 'jt-feed-tabs');
     topics.setAttribute('aria-label', 'Explore topics');
-    for (const [id, title] of exploreTopics) {
-      const control = button(title, () => { exploreTopic = id; return load('explore'); });
+    for (const [id, title] of [['general', 'General'], ...exploreTopics]) {
+      const control = button(title, () => { exploreTopic = id; return load(id === 'general' && homeFeed === 'for-you' ? 'for-you' : 'explore'); });
       control.dataset.topic = id;
       topics.append(control);
     }
@@ -692,14 +681,14 @@
       homeFeed = kind;
       const revision = ++request;
       const isCurrent = () => status === pageStatus && request === revision;
-      const topic = exploreTopic || dailyTopic();
+      const topic = kind === 'explore' && exploreTopic && exploreTopic !== 'general' ? exploreTopic : 'general';
       for (const control of nav.children) control.setAttribute('aria-pressed', String(control.dataset.feed === kind));
       for (const control of topics.children) control.setAttribute('aria-pressed', String(control.dataset.topic === topic));
       const saved = ['continue', 'later', 'favorites'].includes(kind);
       sort[1].value = homeSort.get(kind) || (['continue', 'for-you', 'general'].includes(kind) ? 'default' : 'newest');
       sort[0].hidden = false;
       reorderFeed = () => {};
-      topics.hidden = kind !== 'explore';
+      topics.hidden = !['for-you', 'general', 'explore'].includes(kind);
       formats.hidden = saved;
       hint.hidden = saved || homeFormat !== 'shorts';
       if (saved) {
@@ -722,7 +711,7 @@
       loading.setAttribute('role', 'status');
       feed.replaceChildren(loading);
       const discovery = [dailyTopic(), dailyTopic(2), dailyTopic(4)].map(explorePath);
-      const paths = kind === 'general' ? discovery : kind === 'explore' ? [explorePath(topic)] : kind === 'following'
+      const paths = kind === 'general' || (kind === 'explore' && topic === 'general') ? discovery : kind === 'explore' ? [explorePath(topic)] : kind === 'following'
         ? followed.map(channelPath)
         : ['Me/Recommendations/Topics', ...discovery,
           ...[...new Set([...followed, ...watchedChannels])].map(channelPath)];
@@ -833,10 +822,13 @@
       }
     }
     for (const [id, title] of [
-      ['for-you', 'For you'], ['general', 'General'], ['following', 'Following'], ['explore', 'Explore'],
+      ['for-you', 'For you'], ['following', 'Following'], ['explore', 'Explore'],
       ['continue', 'Continue watching'], ['later', 'Watch later'], ['favorites', 'Favorites']
     ]) {
-      const control = button(title, () => load(id));
+      const control = button(title, () => {
+        if (id === 'explore') exploreTopic = 'general';
+        return load(id);
+      });
       control.dataset.feed = id;
       nav.append(control);
     }
@@ -866,7 +858,7 @@
     const view = select('Library layout', s.view, [['grid', 'Grid'], ['list', 'List']]);
     const lang = field('Search language (official API)', s.language), region = field('Search region (official API)', s.region);
     const safe = select('SafeSearch (official API discovery)', session.minimumSafeSearch === 'strict' ? 'strict' : s.safeSearch, session.minimumSafeSearch === 'strict' ? [['strict', 'Strict (administrator policy)']] : [['strict', 'Strict'], ['moderate', 'Moderate']]); safe[1].disabled = !session.safeSearchAvailable;
-    const autoplay = field('Queue following videos in this list (web player)', s.autoplay, 'checkbox'), record = field('Show recent viewing in JellyTube', s.recordHistory, 'checkbox');
+    const autoplay = field('Automatically play the next video in JellyTube', s.autoplay, 'checkbox'), record = field('Show recent viewing in JellyTube', s.recordHistory, 'checkbox');
     for (const f of [height, view, lang, region, safe, autoplay, record]) form.append(f[0]);
     form.append(el('p', 'jt-small', 'Jellyfin controls native playback history and resume. Hiding JellyTube recent viewing does not disable Jellyfin’s own user data.'));
     form.append(button('Save preferences', async () => {

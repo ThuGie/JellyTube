@@ -32,7 +32,7 @@ try:
     call('/JellyTube/Me/Downloads/'+cancelId,'POST');code,_=call('/JellyTube/Me/Downloads/'+cancelId,'DELETE');check('cancel download request',code==204)
     call('/JellyTube/Me/Retained/'+video,'DELETE')
     call('/JellyTube/Me/Settings','PUT',dict(settings,maxHeight=360))
-    _,before=call('/JellyTube/Videos/'+video+'/Prepare','POST')
+    _,before=call('/JellyTube/Videos/'+video+'/Prepare?nativePlayback=true','POST')
     start=time.monotonic();code,_=call('/JellyTube/Me/Downloads/'+video,'POST');check('managed download accepted',code==202)
     previous=None;job=None
     for _ in range(90):
@@ -45,7 +45,7 @@ try:
     if job['status']!='Ready':print(job.get('error'))
     else:
         checks[-1]['elapsedSeconds']=round(time.monotonic()-start,3)
-        _,after=call('/JellyTube/Videos/'+video+'/Prepare','POST');check('native item identity survives download',before['itemId']==after['itemId'])
+        _,after=call('/JellyTube/Videos/'+video+'/Prepare?nativePlayback=true','POST');check('native item identity survives download',before['itemId']==after['itemId'])
         paths=list((live/'data').glob('**/'+video+'/video.strm'));assert paths;url=paths[0].read_text().strip()
         with urllib.request.urlopen(urllib.request.Request(url,headers={'Range':'bytes=0-4095'}),timeout=30) as r:
             data=r.read();check('retained native transport returns a seekable MP4 range',r.status==206 and len(data)==4096 and data[4:8]==b'ftyp')

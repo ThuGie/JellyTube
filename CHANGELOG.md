@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.0.15
+
+- Put General first in the Home category row and select it by default.
+- Keep direct playback, resume, saved videos, and downloads private without adding native library items.
+- Exclude JellyTube's shared library from Recently Added and ask before adding a video for native playback.
+
 ## 0.1.0.14
 
 - Play supported streams directly in Jellyfin Web, with per-user resume and a native player fallback.

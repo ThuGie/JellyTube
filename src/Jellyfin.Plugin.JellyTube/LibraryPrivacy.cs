@@ -1,6 +1,8 @@
 using Jellyfin.Data.Events.Users;
 using MediaBrowser.Controller.Events;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Model.Dto;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Controllers;
 using Microsoft.AspNetCore.Mvc.Filters;
 using Microsoft.AspNetCore.Mvc;
@@ -46,6 +48,14 @@ public sealed class LibraryPrivacyFilter(LibraryPrivacy privacy, Access access) 
 {
     public async Task OnActionExecutionAsync(ActionExecutingContext context, ActionExecutionDelegate next)
     {
+        var latest = HttpMethods.IsGet(context.HttpContext.Request.Method)
+            && context.HttpContext.Request.Path.Value?.TrimEnd('/').EndsWith("/Items/Latest", StringComparison.OrdinalIgnoreCase) == true
+            && access.SharedLibraryId is not null;
+        if (latest && Guid.TryParse(context.HttpContext.Request.Query["parentId"], out var parent) && parent == access.SharedLibraryId)
+        {
+            context.Result = new OkObjectResult(Array.Empty<BaseItemDto>());
+            return;
+        }
         if (context.ActionDescriptor is ControllerActionDescriptor before && before.ControllerName == "LibraryStructure"
             && before.ActionName is "AddVirtualFolder" or "AddMediaPath" or "UpdateMediaPath" or "UpdateLibraryOptions")
         {
@@ -58,6 +68,8 @@ public sealed class LibraryPrivacyFilter(LibraryPrivacy privacy, Access access) 
             }
         }
         var result = await next();
+        if (latest && result.Result is ObjectResult { Value: IEnumerable<BaseItemDto> items } output)
+            output.Value = items.Where(item => !access.IsSharedItem(item.Id)).ToArray();
         if (result.Exception is null && context.ActionDescriptor is ControllerActionDescriptor descriptor
             && descriptor.ControllerName == "User" && descriptor.ActionName is "UpdateUserPolicy" or "CreateUserByName") await privacy.Enforce();
     }

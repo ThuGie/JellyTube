@@ -29,6 +29,9 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
       await page.locator('#jt-launch').waitFor(); await page.locator('#jt-launch').click();
       await page.getByRole('heading', { name: 'YouTube', exact: true }).waitFor();
       const feeds = page.getByRole('navigation', { name: 'Home feeds' });
+      const categories = page.getByRole('navigation', { name: 'Explore topics' });
+      assert.equal(await categories.getByRole('button').first().textContent(), 'General');
+      assert.equal(await categories.getByRole('button', { name: 'General', exact: true }).getAttribute('aria-pressed'), 'true');
       if (name === 'desktop') {
         await page.locator('.jt-card').nth(23).waitFor();
         await page.getByLabel('Sort loaded videos').selectOption('newest');
@@ -41,8 +44,8 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
         await feeds.getByRole('button', { name: 'Explore', exact: true }).click();
         await page.getByRole('navigation', { name: 'Explore topics' }).getByRole('button', { name: 'Gaming', exact: true }).click();
         await page.getByText('gaming discovery', { exact: true }).waitFor();
-        await feeds.getByRole('button', { name: 'General', exact: true }).click();
-        assert.equal(await feeds.getByRole('button', { name: 'General', exact: true }).getAttribute('aria-pressed'), 'true');
+        await categories.getByRole('button', { name: 'General', exact: true }).click();
+        assert.equal(await categories.getByRole('button', { name: 'General', exact: true }).getAttribute('aria-pressed'), 'true');
         await page.locator('.jt-card').nth(2).waitFor();
         await feeds.getByRole('button', { name: 'Watch later', exact: true }).click();
         assert.equal(await feeds.getByRole('button', { name: 'Watch later', exact: true }).getAttribute('aria-pressed'), 'true');
@@ -123,6 +126,7 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
           await route.continue();
         }, { times: 1 });
         const started = performance.now();
+        page.once('dialog', dialog => dialog.accept());
         await direct.getByRole('button', { name: 'Play in Jellyfin' }).click();
         await page.getByText('Opening Jellyfin player…', { exact: true }).waitFor();
         await page.evaluate(() => {
@@ -148,6 +152,7 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
         checks.push({ check: 'one-click native web playback', passed: true, videoWidth: state.width, firstFrameMs });
         const warmStarted = performance.now();
         await play.click();
+        page.once('dialog', dialog => dialog.accept());
         await direct.getByRole('button', { name: 'Play in Jellyfin' }).click();
         await page.waitForFunction(() => {
           const video = document.querySelector('video');

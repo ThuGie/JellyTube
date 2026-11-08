@@ -17,7 +17,7 @@ public sealed class Downloads(Store store, Extractor extractor, JellyfinMuxer mu
     public string? PlaybackFile(string id, int height, MediaAsset? asset, int minimumHeight = 0)
     {
         if (asset?.LocalFile is { } local && File.Exists(local)
-            && (minimumHeight == 0 || store.Get<DownloadJob>(asset.Owner, "download", id)?.MaxHeight >= minimumHeight)) return local;
+            && (minimumHeight == 0 || store.Get<DownloadJob>(asset.Owner.Replace(NativeLibrary.DirectPrefix, "", StringComparison.Ordinal), "download", id)?.MaxHeight >= minimumHeight)) return local;
         var shared = SharedPath(id, height);
         if (File.Exists(shared)) return shared;
         if (asset?.Owner != NativeLibrary.SharedOwner || minimumHeight >= height) return null;
@@ -189,7 +189,6 @@ public sealed class Downloads(Store store, Extractor extractor, JellyfinMuxer mu
             }
             await download;
             access.Binding(job.Owner); cancel.Token.ThrowIfCancellationRequested();
-            var prepared = await native.Prepare(job.Owner, job.Video, cancel.Token);
             lock (_gate)
             {
                 cancel.Token.ThrowIfCancellationRequested();
@@ -200,10 +199,9 @@ public sealed class Downloads(Store store, Extractor extractor, JellyfinMuxer mu
                     Directory.CreateDirectory(Path.GetDirectoryName(final)!);
                     File.Move(Path.Combine(staging, "video.mp4"), final, true);
                 }
-                var asset = store.Get<MediaAsset>(job.Owner, "asset", job.Id) ?? prepared;
+                var asset = store.Get<MediaAsset>(job.Owner, "asset", job.Id) ?? new MediaAsset(job.Id, job.Owner, job.Video, "", "");
                 store.Put(job.Owner, "asset", job.Id, asset with { Owner = job.Owner, LocalFile = final, Retained = true });
                 _pendingDeletion.Remove(final);
-                // Keep the stable STRM item for progress; the capability serves the retained file through the same native path.
                 store.Put(job.Owner, "download", job.Id, job with { Status = "Ready", Progress = 1, Stage = "Available locally", UpdatedAt = DateTimeOffset.UtcNow });
             }
         }

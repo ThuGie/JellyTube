@@ -6,27 +6,31 @@ namespace Jellyfin.Plugin.JellyTube;
 /// <summary>Jellyfin user data is the canonical favorite/resume state once a video has a native item.</summary>
 public sealed class NativeUserData(Store store, Access access, ILibraryManager library, IUserDataManager userData)
 {
-    public long PlaybackPosition(string owner, string? itemId) =>
-        Guid.TryParse(itemId, out var id) && library.GetItemById(id) is { } item
-            ? userData.GetUserData(access.User(owner), item)?.PlaybackPositionTicks ?? 0
-            : 0;
+    public long PlaybackPosition(string owner, string videoId)
+    {
+        var asset = store.Get<MediaAsset>(owner, "asset", videoId);
+        var direct = store.Get<HistoryEntry>(owner, "resume", videoId);
+        var data = Guid.TryParse(asset?.ItemId, out var id) && library.GetItemById(id) is { } item
+            ? userData.GetUserData(access.User(owner), item) : null;
+        if (direct is not null && (data?.LastPlayedDate is not { } last || direct.WatchedAt.UtcDateTime >= last))
+            return TimeSpan.FromSeconds(direct.PositionSeconds).Ticks;
+        return data?.PlaybackPositionTicks ?? 0;
+    }
 
     public void SaveProgress(string owner, string videoId, DirectProgressRequest progress, CancellationToken ct)
     {
-        var asset = store.Get<MediaAsset>(owner, "asset", videoId);
-        var user = access.User(owner);
-        if (!Guid.TryParse(asset?.ItemId, out var id) || library.GetItemById(id) is not { } item || !item.IsVisible(user))
-            throw new KeyNotFoundException("The prepared video is unavailable.");
-        var data = userData.GetUserData(user, item) ?? throw new InvalidOperationException("Playback state is unavailable.");
-        data.PlaybackPositionTicks = progress.Completed ? 0 : TimeSpan.FromSeconds(progress.PositionSeconds).Ticks;
-        data.LastPlayedDate = DateTime.UtcNow;
-        if (progress.Completed) { data.Played = true; data.PlayCount++; }
-        userData.SaveUserData(user, item, data, UserDataSaveReason.UpdateUserData, ct);
+        var asset = store.Get<MediaAsset>(owner, "direct", videoId)
+            ?? throw new KeyNotFoundException("The prepared video is unavailable.");
+        ct.ThrowIfCancellationRequested();
+        var entry = new HistoryEntry(asset.Video, progress.Completed ? 0 : progress.PositionSeconds, DateTimeOffset.UtcNow);
+        store.Put(owner, "resume", videoId, entry);
+        if (store.Settings(owner).RecordHistory) store.Put(owner, "history", videoId, entry);
     }
 
     public Task SetFavorite(string owner, string id, bool favorite, CancellationToken ct)
     {
-        var asset = store.Get<MediaAsset>(owner, "asset", id); var item = asset is null ? null : library.FindByPath(Path.Combine(asset.Directory, "video.strm"), false);
+        var asset = store.Get<MediaAsset>(owner, "asset", id);
+        var item = Guid.TryParse(asset?.ItemId, out var itemId) ? library.GetItemById(itemId) : null;
         if (item is null) { store.Delete(owner, "favoriteSync", id); return Task.CompletedTask; }
         var user = access.User(owner); var data = userData.GetUserData(user, item) ?? throw new InvalidOperationException("Native user data is not ready yet."); data.IsFavorite = favorite;
         userData.SaveUserData(user, item, data, UserDataSaveReason.UpdateUserData, ct);
@@ -45,7 +49,8 @@ public sealed class NativeUserData(Store store, Access access, ILibraryManager l
         }
         foreach (var asset in assets)
         {
-            var item = library.FindByPath(Path.Combine(asset.Directory, "video.strm"), false); if (item is null || !item.IsVisible(user)) continue;
+            var item = Guid.TryParse(asset.ItemId, out var id) ? library.GetItemById(id) : null;
+            if (item is null || !item.IsVisible(user)) continue;
             ct.ThrowIfCancellationRequested(); var data = userData.GetUserData(user, item); if (data is null) continue;
             var saved = store.Get<SavedVideo>(owner, "favorite", asset.Id);
             if (saved is not null && !store.Get<bool>(owner, "favoriteSync", asset.Id))
@@ -57,7 +62,9 @@ public sealed class NativeUserData(Store store, Access access, ILibraryManager l
             if (settings.RecordHistory && data.LastPlayedDate is { } last)
             {
                 var at = new DateTimeOffset(DateTime.SpecifyKind(last, DateTimeKind.Utc));
-                if (cleared is null || at > cleared) store.Put(owner, "history", asset.Id, new HistoryEntry(asset.Video, data.PlaybackPositionTicks / (double)TimeSpan.TicksPerSecond, at));
+                var existing = store.Get<HistoryEntry>(owner, "history", asset.Id);
+                if ((cleared is null || at > cleared) && (existing is null || at > existing.WatchedAt))
+                    store.Put(owner, "history", asset.Id, new HistoryEntry(asset.Video, data.PlaybackPositionTicks / (double)TimeSpan.TicksPerSecond, at));
             }
         }
         return Task.CompletedTask;

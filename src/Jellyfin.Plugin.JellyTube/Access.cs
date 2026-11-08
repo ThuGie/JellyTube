@@ -51,6 +51,11 @@ public sealed class Access(IUserManager users, ILibraryManager library)
         try { Binding(owner); return true; }
         catch (Exception ex) when (ex is UnauthorizedAccessException or InvalidOperationException) { return false; }
     }
+    public Guid? SharedLibraryId => Guid.TryParse(Plugin.Instance.Configuration.SharedLibrary?.LibraryId, out var id) ? id : null;
+
+    public bool IsSharedItem(Guid id) =>
+        Plugin.Instance.Configuration.SharedLibrary is { } shared && library.GetItemById(id)?.Path is { Length: > 0 } path
+            && Rules.PathsOverlap(shared.Root, path);
     private static IEnumerable<LibraryBinding> ManagedLibraries() => Plugin.Instance.Configuration.Libraries
         .Concat(Plugin.Instance.Configuration.SharedLibrary is { } shared ? [shared] : []);
     public void CheckMediaRoot(string root)

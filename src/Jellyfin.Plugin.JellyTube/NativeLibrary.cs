@@ -31,6 +31,16 @@ public sealed class NativeLibrary(Store store, Access access, ILibraryManager li
         ? Path.Combine(Plugin.Instance.DataFolderPath, "media") : Path.GetFullPath(Plugin.Instance.Configuration.MediaRoot);
 
     public const string SharedOwner = "shared";
+    public const string DirectPrefix = "direct-";
+
+    public MediaAsset PrepareDirect(string owner, VideoInfo video)
+    {
+        var existing = store.Get<MediaAsset>(owner, "direct", video.Id);
+        var asset = existing ?? new MediaAsset(video.Id, DirectPrefix + owner, video, "",
+            Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant());
+        if (existing is null) store.Put(owner, "direct", video.Id, asset);
+        return asset;
+    }
     public void DisableSharedLibraryWatcher()
     {
         if (Plugin.Instance.Configuration.SharedLibrary is not { } shared
@@ -139,14 +149,15 @@ public sealed class NativeLibrary(Store store, Access access, ILibraryManager li
         try
         {
             var asset = store.Get<MediaAsset>(mediaOwner, "asset", video.Id);
-            if (asset is null)
+            if (asset is null || string.IsNullOrEmpty(asset.Directory))
             {
                 var dir = Rules.Inside(binding.Root, video.Id);
                 monitor.ReportFileSystemChangeBeginning(dir);
                 changingDirectory = dir;
                 Directory.CreateDirectory(dir);
                 video = video with { Title = video.Title[..Math.Min(video.Title.Length, 500)], Description = video.Description?[..Math.Min(video.Description.Length, 20000)] };
-                asset = new(video.Id, mediaOwner, video, dir, Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant());
+                asset = new(video.Id, mediaOwner, video, dir, Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant(),
+                    LocalFile: asset?.LocalFile, Retained: asset?.Retained ?? false);
                 store.Put(mediaOwner, "asset", video.Id, asset);
             }
             var url = Plugin.Instance.Configuration.PublicBaseUrl.TrimEnd('/') + "/JellyTube/Media/" + mediaOwner + "/" + video.Id + "/" + asset.Secret + "/manifest.mpd";
@@ -270,12 +281,18 @@ public sealed class NativeLibrary(Store store, Access access, ILibraryManager li
     public MediaAsset Resolve(string owner, string id, string secret)
     {
         Rules.VideoId(id);
-        if (owner != SharedOwner) access.Binding(owner, legacy: true);
+        var direct = owner.StartsWith(DirectPrefix, StringComparison.Ordinal);
+        var account = direct ? owner[DirectPrefix.Length..] : owner;
+        if (direct)
+        {
+            if (!access.CanPlayDirect(account)) throw new UnauthorizedAccessException("Direct playback is unavailable.");
+        }
+        else if (owner != SharedOwner) access.Binding(owner, legacy: true);
         else if (Plugin.Instance.Configuration.SharedLibrary is null) throw new UnauthorizedAccessException("Shared playback is unavailable.");
-        var asset = store.Get<MediaAsset>(owner, "asset", id);
+        var asset = store.Get<MediaAsset>(account, direct ? "direct" : "asset", id);
         if (asset is null || secret.Length != 64 || !CryptographicOperations.FixedTimeEquals(System.Text.Encoding.ASCII.GetBytes(asset.Secret), System.Text.Encoding.ASCII.GetBytes(secret)))
             throw new UnauthorizedAccessException("Invalid media capability.");
-        return asset;
+        return direct ? asset with { LocalFile = store.Get<MediaAsset>(account, "asset", id)?.LocalFile } : asset;
     }
     public async Task Refresh(string owner, CancellationToken ct)
     {

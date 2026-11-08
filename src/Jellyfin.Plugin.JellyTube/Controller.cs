@@ -116,33 +116,35 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
         try { Rules.VideoId(id); return true; } catch (ValidationException) { return false; }
     }
     [HttpPost("Videos/{id}/Prepare")]
-    public async Task<ActionResult> Prepare(string id, CancellationToken ct, [FromQuery] bool warm = true)
+    public async Task<ActionResult> Prepare(string id, CancellationToken ct, [FromQuery] bool warm = true, [FromQuery] bool nativePlayback = false)
     {
         var owner = Owner();
         access.Binding(owner);
-        var directPlayback = access.CanPlayDirect(owner);
+        var directPlayback = access.CanPlayDirect(owner) && !nativePlayback;
+        if (!directPlayback && !nativePlayback) return Ok(new { requiresNative = true });
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         Rules.VideoId(id);
         var height = Plugin.Instance.Configuration.SharedLibrary is null ? store.Settings(owner).MaxHeight : MediaController.SharedStreamHeight;
         if (warm && downloads.PlaybackFile(id, height, store.Get<MediaAsset>(owner, "asset", id), minimumHeight: height) is null)
             _ = extractor.WarmAdaptive(id, height);
         var video = await Video(owner, id, ct);
-        var asset = await native.Prepare(owner, video, ct);
+        var asset = directPlayback ? native.PrepareDirect(owner, video) : await native.Prepare(owner, video, ct);
         var prepareMs = System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds;
         HttpContext.RequestServices.GetRequiredService<ILogger<JellyTubeController>>()
             .LogInformation("JellyTube playback preparation {Reference} completed in {PrepareMs:F0} ms.", HttpContext.TraceIdentifier, prepareMs);
-        return Ok(new { video = asset.Video, itemId = asset.ItemId, positionTicks = nativeUserData.PlaybackPosition(owner, asset.ItemId),
+        return Ok(new { video = asset.Video, itemId = asset.ItemId, positionTicks = nativeUserData.PlaybackPosition(owner, id),
             reference = HttpContext.TraceIdentifier, prepareMs, status = "Ready", directPlayback });
     }
     [HttpGet("Videos/{id}/Source")]
     public async Task<ActionResult> DirectSource(string id, CancellationToken ct)
     {
         var owner = Owner();
-        var binding = access.Binding(owner);
+        access.Binding(owner);
         if (!access.CanPlayDirect(owner)) throw new UnauthorizedAccessException("This Jellyfin account requires the native player.");
         Rules.VideoId(id);
-        var asset = store.Get<MediaAsset>(binding.UserId, "asset", id) ?? throw new KeyNotFoundException("Prepare the video first.");
-        var height = binding.UserId == NativeLibrary.SharedOwner ? MediaController.SharedStreamHeight : store.Settings(owner).MaxHeight;
+        var asset = store.Get<MediaAsset>(owner, "direct", id) ?? throw new KeyNotFoundException("Prepare the video first.");
+        asset = asset with { LocalFile = store.Get<MediaAsset>(owner, "asset", id)?.LocalFile };
+        var height = MediaController.SharedStreamHeight;
         var path = $"JellyTube/Media/{asset.Owner}/{asset.Id}/{asset.Secret}/";
         if (downloads.PlaybackFile(id, height, asset, minimumHeight: height) is not null)
             return Ok(new { mode = "mp4", path = path + "local.mp4?fullQuality=true" });
@@ -199,7 +201,6 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
     {
         var owner = Owner(); var video = await Video(owner, id, ct);
         store.Put(owner, kind == "Favorites" ? "favorite" : "later", id, new SavedVideo(video, DateTimeOffset.UtcNow));
-        if (access.CanUse(owner)) await native.Prepare(owner, video, ct);
         if (kind == "Favorites") await nativeUserData.SetFavorite(owner, id, true, ct); return NoContent();
     }
     [HttpGet("Me/Recommendations/Topics")]
@@ -295,12 +296,12 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
     [HttpGet("Me/Export")]
     public ActionResult Export()
     {
-        var owner = Owner(); return Ok(new { settings = store.Settings(owner), favorites = store.List<SavedVideo>(owner, "favorite"), watchLater = store.List<SavedVideo>(owner, "later"), playlists = store.List<PersonalPlaylist>(owner, "playlist"), channels = store.List<SavedChannel>(owner, "channel"), history = store.List<HistoryEntry>(owner, "history") });
+        var owner = Owner(); return Ok(new { settings = store.Settings(owner), favorites = store.List<SavedVideo>(owner, "favorite"), watchLater = store.List<SavedVideo>(owner, "later"), playlists = store.List<PersonalPlaylist>(owner, "playlist"), channels = store.List<SavedChannel>(owner, "channel"), history = store.List<HistoryEntry>(owner, "history"), resume = store.List<HistoryEntry>(owner, "resume") });
     }
     [HttpDelete("Me/Data")]
     public ActionResult ClearData()
     {
-        var owner = Owner(); foreach (var kind in new[] { "favorite", "favoriteSync", "later", "playlist", "channel", "history", "video", "settings" }) store.Delete(owner, kind);
+        var owner = Owner(); foreach (var kind in new[] { "favorite", "favoriteSync", "later", "playlist", "channel", "history", "video", "settings", "resume", "direct" }) store.Delete(owner, kind);
         ClearWatchHistory(owner);
         return NoContent(); // Retained media and native Jellyfin user data have their own explicit management.
     }
