@@ -36,6 +36,24 @@
   const select = (label, value, values) => { const wrap = el('label', '', label), input = el('select'); for (const [key, name] of values) { const o = el('option', '', name); o.value = key; input.append(o); } input.value = value; wrap.append(input); return [wrap, input]; };
   const heading = (title, subtitle) => { main.append(el('div', 'jt-kicker', 'JELLYTUBE / YOUR VIDEO SPACE'), el('h1', '', title)); if (subtitle) main.append(el('p', '', subtitle)); };
   const empty = text => main.append(el('div', 'jt-empty', text));
+  function settingsPanel(title, description) {
+    const panel = el('section', 'jt-settings-panel');
+    panel.append(el('h2', '', title));
+    if (description) panel.append(el('p', 'jt-settings-description', description));
+    return panel;
+  }
+  function settingsFields(panel, fields) {
+    const grid = el('div', 'jt-settings-fields');
+    for (const [label] of fields) grid.append(label);
+    panel.append(grid);
+  }
+  function settingsLink(label, url) {
+    const link = el('a', 'jt-settings-link', label);
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    return link;
+  }
   const saved = (kind, id) => (library?.[kind] || []).some(s => s.video.id === id);
   const duration = s => !s ? '' : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
   async function refreshLibrary() { library = await api('Me/Library'); }
@@ -886,47 +904,69 @@
     await update();
   }
   async function renderSettings() {
-    heading('Make it yours.', 'Preferences follow your Jellyfin account across browsers.');
-    const form = el('form', 'jt-settings'), s = session.settings;
+    heading('Settings', 'Manage your JellyTube account, playback preferences, and personal data.');
+    const layout = el('div', 'jt-settings-layout');
+    const accountPanel = settingsPanel('YouTube account', 'Connect your subscriptions to For You and Following.');
+    const badge = el('span', 'jt-settings-badge', session.youTubeConnected ? 'Connected' : session.youTubeConfigured ? 'Disconnected' : 'Server setup required');
+    badge.dataset.ready = String(session.youTubeConnected);
+    accountPanel.append(badge);
+    const accountActions = el('div', 'jt-settings-actions');
+    const form = el('form', 'jt-settings-layout'), s = session.settings;
     const height = select('Maximum download resolution', s.maxHeight, [360,480,720,1080,1440,2160].map(v => [v, v + 'p']));
     const view = select('Library layout', s.view, [['grid', 'Grid'], ['list', 'List']]);
     const lang = field('Search language (official API)', s.language), region = field('Search region (official API)', s.region);
     const safe = select('SafeSearch (official API discovery)', session.minimumSafeSearch === 'strict' ? 'strict' : s.safeSearch, session.minimumSafeSearch === 'strict' ? [['strict', 'Strict (administrator policy)']] : [['strict', 'Strict'], ['moderate', 'Moderate']]); safe[1].disabled = !session.safeSearchAvailable;
     const autoplay = field('Automatically play the next video in JellyTube', s.autoplay, 'checkbox'), record = field('Show recent viewing in JellyTube', s.recordHistory, 'checkbox');
-    for (const f of [height, view, lang, region, safe, autoplay, record]) form.append(f[0]);
-    form.append(el('p', 'jt-small', 'Jellyfin controls native playback history and resume. Hiding JellyTube recent viewing does not disable Jellyfin’s own user data.'));
-    form.append(button('Save preferences', async () => {
+    const playback = settingsPanel('Playback and library', 'Choose how videos play and how your library is displayed.');
+    settingsFields(playback, [height, view, autoplay, record]);
+    const discovery = settingsPanel('Discovery', session.safeSearchAvailable ? 'Set your preferences for YouTube search.' : 'Language, region, and SafeSearch apply when the server uses the official YouTube API.');
+    settingsFields(discovery, [lang, region, safe]);
+    const save = el('div', 'jt-settings-actions');
+    save.append(button('Save preferences', async () => {
       session.settings = await api('Me/Settings', 'PUT', { maxHeight: Number(height[1].value), view: view[1].value, language: lang[1].value, region: region[1].value.toUpperCase(), safeSearch: safe[1].value, autoplay: autoplay[1].checked, recordHistory: record[1].checked });
       message('Preferences saved.');
     }, 'jt-primary'));
-    form.onsubmit = e => e.preventDefault(); main.append(form, el('h2', '', 'YouTube account'));
+    form.onsubmit = e => e.preventDefault();
+    form.append(playback, discovery, save);
     if (session.youTubeConnected) {
-      main.append(el('p', '', 'Connected. For You and Following show uploads from your YouTube subscriptions.'));
-      main.append(button('Refresh subscriptions', async () => {
+      accountActions.append(button('Refresh subscriptions', async () => {
         const subscriptions = await api('Me/YouTube/Subscriptions', 'POST');
         message(`Refreshed ${subscriptions.length} YouTube subscriptions.`);
       }));
-      main.append(button('Disconnect YouTube', async () => {
+      accountActions.append(button('Disconnect YouTube', async () => {
         await api('Me/YouTube', 'DELETE');
         session.youTubeConnected = false;
         await navigate('settings');
         message('YouTube disconnected.');
       }));
     }
-    if (session.youTubeConfigured) main.append(button(session.youTubeConnected ? 'Reconnect YouTube' : 'Connect YouTube', async () => {
+    if (session.youTubeConfigured) accountActions.append(button(session.youTubeConnected ? 'Reconnect YouTube' : 'Connect YouTube', async () => {
       const result = await api('Me/YouTube/Connect', 'POST');
       location.assign(result.url);
     }, 'jt-primary'));
-    else if (!session.youTubeConnected) main.append(el('p', 'jt-small', 'An administrator can enable YouTube connections in JellyTube setup.'));
-    main.append(el('h2', '', 'Your data'));
-    main.append(button('Export my JellyTube data', async () => { const data = await api('Me/Export'); const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })); const a = el('a'); a.href = url; a.download = 'jellytube-data.json'; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); }), button('Clear recent viewing', async () => { await api('Me/History', 'DELETE'); await refreshLibrary(); message('JellyTube recent viewing cleared.'); }));
+    else if (!session.youTubeConnected) accountPanel.append(el('p', 'jt-small', 'Your server administrator can enable this in Dashboard → JellyTube.'));
+    accountPanel.append(accountActions);
+    const data = settingsPanel('Your data', 'Export your JellyTube data or clear your recent viewing list.');
+    const dataActions = el('div', 'jt-settings-actions');
+    dataActions.append(button('Export my JellyTube data', async () => { const data = await api('Me/Export'); const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })); const a = el('a'); a.href = url; a.download = 'jellytube-data.json'; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); }), button('Clear recent viewing', async () => { await api('Me/History', 'DELETE'); await refreshLibrary(); message('JellyTube recent viewing cleared.'); }));
+    data.append(dataActions);
+    layout.append(accountPanel, form, data);
+    main.append(layout);
   }
   async function renderAdmin() {
-    heading('JellyTube setup', 'A standalone plugin. No yt-dlp, Python, Node, Deno, container, or companion service.');
+    heading('JellyTube setup', 'Configure server access, media storage, and optional YouTube sign-in.');
     const [c, health] = await Promise.all([api('Admin/Settings'), api('Admin/Health')]);
-    main.append(el('p', 'jt-small', `${health.extractor} · Jellyfin FFmpeg: ${health.ffmpegAvailable ? 'ready' : 'unavailable'} · ${(health.storageBytes / 1073741824).toFixed(2)} GiB stored · Web navigation: ${health.navigation ? 'ready' : 'File Transformation unavailable'}`));
-    main.append(el('p', 'jt-small', `Shared library: ${health.sharedLibraryAvailable ? 'ready' : 'needs setup'} · Shared storage: ${(health.sharedBytes / 1073741824).toFixed(2)} GiB · Media URL: ${health.mediaUrlConfigured ? 'configured' : 'missing or invalid'}`));
-    if (health.mediaUrlConfigured) main.append(button('Check saved media URL', async () => {
+    const layout = el('div', 'jt-settings-layout');
+    const summary = el('div', 'jt-settings-summary');
+    for (const [name, value] of [['Media URL', health.mediaUrlConfigured ? 'Configured' : 'Needs setup'],
+      ['Shared library', health.sharedLibraryAvailable ? 'Ready' : 'Needs setup'],
+      ['Storage used', `${(health.storageBytes / 1073741824).toFixed(2)} GiB`],
+      ['Jellyfin FFmpeg', health.ffmpegAvailable ? 'Ready' : 'Unavailable']]) {
+      const metric = el('div'); metric.append(el('span', '', name), el('strong', '', value)); summary.append(metric);
+    }
+    layout.append(summary);
+    const server = settingsPanel('Server and storage', 'Set the HTTPS address users open in their browser and the folder JellyTube uses for media.');
+    if (health.mediaUrlConfigured) server.append(button('Check saved media URL', async () => {
       const result = await fetch(c.publicBaseUrl.replace(/\/$/, '') + '/System/Info/Public', {
         credentials: 'omit', signal: AbortSignal.timeout(8000)
       });
@@ -934,7 +974,7 @@
         throw new Error('The saved media URL did not identify this Jellyfin server.');
       message('The saved media URL reaches this Jellyfin server from your browser.');
     }));
-    const form = el('form', 'jt-settings');
+    const form = el('form', 'jt-settings-layout');
     const base = field('Jellyfin URL reachable by every client (include base path)', c.publicBaseUrl || location.origin + location.pathname.replace(/\/web\/.*/, ''));
     const media = field('Dedicated server folder outside existing shared libraries', c.mediaRoot), budget = field('Storage budget in MiB', c.storageBudgetMb, 'number');
     const downloads = field('Allow retained video downloads', c.enableDownloads, 'checkbox'), searches = field('Daily server search budget', c.searchCallsPerDay, 'number'), userLimit = field('Daily search budget per user', c.userSearchCallsPerDay, 'number');
@@ -942,18 +982,41 @@
     const oauthId = field('Google OAuth client ID (optional)', c.youTubeClientId);
     const oauthSecret = field(c.youTubeClientSecretConfigured ? 'Google OAuth client secret (leave blank to keep)' : 'Google OAuth client secret', '', 'password');
     const minimumSafe = select('Minimum SafeSearch (official video discovery only)', c.minimumSafeSearch, [['moderate', 'Moderate'], ['strict', 'Strict']]);
-    for (const f of [base, media, budget, downloads, searches, userLimit, apiKey, minimumSafe, oauthId, oauthSecret]) form.append(f[0]);
-    form.append(el('p', 'jt-small', 'Google OAuth redirect URI for the saved Jellyfin URL'), el('code', '', c.youTubeCallback));
-    form.append(button('Save setup', async () => { await api('Admin/Settings', 'PUT', { publicBaseUrl: base[1].value, mediaRoot: media[1].value, storageBudgetMb: Number(budget[1].value), enableDownloads: downloads[1].checked, searchCallsPerDay: Number(searches[1].value), userSearchCallsPerDay: Number(userLimit[1].value), deniedUsers: c.deniedUsers, downloadDeniedUsers: c.downloadDeniedUsers, minimumSafeSearch: minimumSafe[1].value, apiKey: apiKey[1].value || null, youTubeClientId: oauthId[1].value, youTubeClientSecret: oauthSecret[1].value || null }); await navigate('admin'); message('Setup saved.'); }, 'jt-primary'));
-    form.onsubmit = e => e.preventDefault(); main.append(form, el('h2', '', 'Shared JellyTube library'));
-    main.append(el('p', '', 'Everyone with library access can browse its videos. Favorites, history, playlists and download ownership stay with each account.'));
-    main.append(button(
+    settingsFields(server, [base, media, budget, downloads]);
+    const discovery = settingsPanel('YouTube discovery', 'Manage public search, API quotas, and SafeSearch.');
+    settingsFields(discovery, [searches, userLimit, apiKey, minimumSafe]);
+    const oauth = settingsPanel('YouTube sign-in', 'Optional. Set this up once so users can connect their own subscriptions.');
+    const steps = el('ol', 'jt-settings-steps');
+    const enable = el('li'); enable.append(settingsLink('Enable YouTube Data API v3', 'https://console.cloud.google.com/apis/library/youtube.googleapis.com'), document.createTextNode(' in your Google Cloud project.'));
+    const consent = el('li'); consent.append(settingsLink('Set up the Google consent screen', 'https://console.cloud.google.com/auth/overview'), document.createTextNode(' and add test users if the app is in Testing.'));
+    const create = el('li'); create.append(settingsLink('Create an OAuth client', 'https://console.cloud.google.com/auth/clients'), document.createTextNode(' and choose Web application.'));
+    steps.append(enable, consent, create, el('li', '', 'Register the HTTPS redirect URI below, then paste the client ID and secret and save.'));
+    oauth.append(steps);
+    const callback = field('Authorized redirect URI (saved server URL)', c.youTubeCallback);
+    callback[1].readOnly = true;
+    const copy = button('Copy redirect URI', async () => {
+      if (navigator.clipboard) {
+        try { await navigator.clipboard.writeText(callback[1].value); message('Redirect URI copied.'); return; } catch {}
+      }
+      callback[1].select();
+      message('Redirect URI selected. Copy it with your keyboard.');
+    });
+    const redirect = el('div', 'jt-settings-copy');
+    redirect.append(callback[0], copy);
+    oauth.append(redirect);
+    settingsFields(oauth, [oauthId, oauthSecret]);
+    const save = el('div', 'jt-settings-actions');
+    save.append(button('Save setup', async () => { await api('Admin/Settings', 'PUT', { publicBaseUrl: base[1].value, mediaRoot: media[1].value, storageBudgetMb: Number(budget[1].value), enableDownloads: downloads[1].checked, searchCallsPerDay: Number(searches[1].value), userSearchCallsPerDay: Number(userLimit[1].value), deniedUsers: c.deniedUsers, downloadDeniedUsers: c.downloadDeniedUsers, minimumSafeSearch: minimumSafe[1].value, apiKey: apiKey[1].value || null, youTubeClientId: oauthId[1].value, youTubeClientSecret: oauthSecret[1].value || null }); await navigate('admin'); message('Setup saved.'); }, 'jt-primary'));
+    form.onsubmit = e => e.preventDefault();
+    form.append(server, oauth, discovery, save);
+    const shared = settingsPanel('Shared JellyTube library', 'People with library access can browse registered videos. Personal activity stays with each account.');
+    shared.append(button(
       c.legacyLibraryCount ? 'Set up shared library and migrate' : c.sharedLibrary ? 'Refresh shared library access' : 'Create shared library',
       async () => {
         await api('Admin/Library', 'POST');
         await navigate('admin');
       }, 'jt-primary'));
-    main.append(el('h2', '', 'Account access'));
+    const accounts = settingsPanel('Account access', 'Manage JellyTube access and retained downloads for each Jellyfin user.');
     for (const u of c.users) {
       const row = el('div', 'jt-row'); row.append(el('div', '', u.name));
       const denied = c.deniedUsers.includes(u.id);
@@ -961,8 +1024,10 @@
       else row.append(el('span', 'jt-small', 'Administrator'));
       const downloadBlocked = c.downloadDeniedUsers.includes(u.id);
       row.append(button(downloadBlocked ? 'Allow downloads' : 'Disable downloads', async () => { const next = downloadBlocked ? c.downloadDeniedUsers.filter(id => id !== u.id) : [...c.downloadDeniedUsers, u.id]; await api('Admin/Settings', 'PUT', { ...c, downloadDeniedUsers: next }); await navigate('admin'); }));
-      main.append(row);
+      accounts.append(row);
     }
+    layout.append(form, shared, accounts);
+    main.append(layout);
   }
   async function navigate(next, push = true) {
     if (!root) return;

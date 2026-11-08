@@ -67,6 +67,7 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
       if ((await favorite.textContent()).includes('Favorited')) { await favorite.click(); await expectButton(favorite, '☆ Favorite'); }
       await favorite.click(); await expectButton(favorite, '★ Favorited');
       await page.getByRole('button', { name: 'Settings', exact: true }).click();
+      await page.getByRole('heading', { name: 'YouTube account', exact: true }).waitFor();
       await page.getByLabel('Maximum download resolution').selectOption('720');
       await page.getByRole('button', { name: 'Save preferences', exact: true }).click(); await page.getByText('Preferences saved.', { exact: true }).waitFor();
       await page.screenshot({ path: path.join(live, name + '-settings.png') });
@@ -226,6 +227,9 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
     await page.goto(s.base + '/web/'); await page.locator('#txtManualName').fill('tube-admin'); await page.locator('#txtManualPassword').fill(s.password); await page.locator('#txtManualPassword').press('Enter');
     await page.locator('#jt-launch').waitFor(); await page.goto(s.base + '/web/#/configurationpage?name=JellyTube');
     await page.locator('#jt-admin-host #jt-app.jt-embedded').waitFor(); await page.getByRole('heading', { name: 'JellyTube setup' }).waitFor();
+    await page.getByRole('heading', { name: 'YouTube sign-in', exact: true }).waitFor();
+    assert.ok((await page.getByLabel('Authorized redirect URI (saved server URL)').inputValue()).endsWith('/JellyTube/YouTube/Callback'));
+    assert.equal(await page.getByRole('link', { name: 'Create an OAuth client' }).getAttribute('href'), 'https://console.cloud.google.com/auth/clients');
     await page.screenshot({ path: path.join(live, 'desktop-admin.png') }); checks.push({ check: 'administrator dashboard embedded in Jellyfin', passed: true });
   } finally {
     fs.writeFileSync(path.join(live, 'browser-report.json'), JSON.stringify({ checks }, null, 2)); await browser.close();

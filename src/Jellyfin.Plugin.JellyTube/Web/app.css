@@ -77,3 +77,69 @@ body.jt-open > .docspinner { display:none !important; }
     background: #000;
 }
 #jt-app .jt-direct-player button { margin-inline-end: 8px; }
+
+#jt-app .jt-settings-layout {
+    display: grid;
+    gap: 16px;
+    max-width: 920px;
+}
+#jt-app .jt-settings-panel {
+    min-width: 0;
+    padding: clamp(16px, 3vw, 26px);
+    border: 1px solid var(--jt-line);
+    border-radius: 14px;
+    background: var(--jt-panel);
+}
+#jt-app .jt-settings-panel h2 { margin: 0; font-size: 1.2rem; }
+#jt-app .jt-settings-description { margin: 6px 0 16px; }
+#jt-app .jt-settings-fields, #jt-app .jt-settings-summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr));
+    gap: 12px;
+}
+#jt-app .jt-settings-summary {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr));
+}
+#jt-app .jt-settings-fields label, #jt-app .jt-settings-copy label { min-width: 0; margin: 0; }
+#jt-app .jt-settings-fields label:has(input[type=checkbox]) {
+    align-items: center;
+    min-height: 44px;
+    padding: 8px 12px;
+    border: 1px solid var(--jt-line);
+    border-radius: 8px;
+}
+#jt-app .jt-settings-summary > div {
+    display: grid;
+    gap: 3px;
+    padding: 12px 16px;
+    border: 1px solid var(--jt-line);
+    border-radius: 10px;
+    background: var(--jt-panel);
+}
+#jt-app .jt-settings-summary span { color: var(--jt-muted); font-size: .85rem; }
+#jt-app .jt-settings-actions, #jt-app .jt-settings-copy {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+#jt-app .jt-settings-panel .jt-settings-actions { margin-top: 14px; }
+#jt-app .jt-settings-copy { align-items: end; margin: 16px 0; }
+#jt-app .jt-settings-copy label { flex: 1 1 270px; }
+#jt-app .jt-settings-steps { margin: 0; padding-inline-start: 24px; }
+#jt-app .jt-settings-steps li { margin: 6px 0; }
+#jt-app .jt-settings-link { color: #ffaaa6; text-underline-offset: 3px; }
+#jt-app .jt-settings-badge {
+    display: inline-block;
+    padding: 4px 10px;
+    border: 1px solid var(--jt-line);
+    border-radius: 999px;
+    color: var(--jt-muted);
+    font-size: .85rem;
+}
+#jt-app .jt-settings-badge[data-ready=true] { color: #c4efda; background: #172c25; }
+#jt-app .jt-settings-panel > button + .jt-settings-fields { margin-top: 14px; }
+#jt-app .jt-settings-layout button.jt-primary:hover {
+    background: #ff928d;
+    color: #170e0f;
+}

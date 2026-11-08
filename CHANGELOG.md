@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.0.18
+
+- Organize personal preferences and server setup into responsive settings sections.
+- Show YouTube connection status and add Google Cloud setup links and a copyable callback URL.
+
 ## 0.1.0.17
 
 - Add optional per-user YouTube sign-in and read-only subscription sync.
