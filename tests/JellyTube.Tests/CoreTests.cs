@@ -8,6 +8,25 @@ namespace JellyTube.Tests;
 public sealed class CoreTests : IDisposable
 {
     [Theory]
+    [InlineData("", true)]
+    [InlineData("?n=needs-deciphering", false)]
+    public void QuickFormatsRequireClearOriginalAudio(string originalQuery, bool expected)
+    {
+        using var json = System.Text.Json.JsonDocument.Parse($$$"""
+            {"playabilityStatus":{"status":"OK"},"videoDetails":{"videoId":"aqz-KE-bpKQ"},
+             "streamingData":{"adaptiveFormats":[
+               {"mimeType":"video/mp4; codecs=\"avc1.640028\"","url":"https://media.googlevideo.com/video",
+                "contentLength":"100000","bitrate":900000,"width":1920,"height":1080,"fps":30},
+               {"mimeType":"audio/mp4; codecs=\"mp4a.40.2\"","url":"https://media.googlevideo.com/dub",
+                "contentLength":"10000","bitrate":128000,"audioTrack":{"id":"en.10","audioIsDefault":true}},
+               {"mimeType":"audio/mp4; codecs=\"mp4a.40.2\"","url":"https://media.googlevideo.com/original{{{originalQuery}}}",
+                "contentLength":"10000","bitrate":96000,"audioTrack":{"id":"es.4","displayName":"Spanish original"}}
+             ]}}
+            """);
+        Assert.Equal(expected, QuickFormats.Parse(json.RootElement, "aqz-KE-bpKQ", 1080) is not null);
+        Assert.Null(QuickFormats.Parse(json.RootElement, "8xfEpjgOzIA", 1080));
+    }
+    [Theory]
     [InlineData("Spanish (US) original", false, "", 4)]
     [InlineData("Spanish (US)", false, "?xtags=lang%3Des%3Aacont%3Doriginal", 4)]
     [InlineData("English (US)", true, "", 3)]

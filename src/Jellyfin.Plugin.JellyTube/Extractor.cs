@@ -22,8 +22,9 @@ public sealed class Extractor
     private readonly IHttpClientFactory _http;
     private readonly SegmentCache _segments;
     private readonly ILogger<Extractor> _logger;
-    public Extractor(IHttpClientFactory http, SegmentCache segments, ILogger<Extractor> logger)
-    { _http = http; _segments = segments; _logger = logger; _youtube = new(http.CreateClient("JellyTube.YouTube")); }
+    private readonly QuickFormats _quickFormats;
+    public Extractor(IHttpClientFactory http, SegmentCache segments, ILogger<Extractor> logger, QuickFormats quickFormats)
+    { _http = http; _segments = segments; _logger = logger; _quickFormats = quickFormats; _youtube = new(http.CreateClient("JellyTube.YouTube")); }
     public async Task<PlaybackSource> ResolvePlayback(string id, int maxHeight, CancellationToken ct)
     {
         Rules.VideoId(id); var key = id + ":" + maxHeight;
@@ -54,48 +55,65 @@ public sealed class Extractor
         try
         {
             var started = System.Diagnostics.Stopwatch.GetTimestamp();
-            var manifest = await ResolveFormats(id, timeout.Token);
-            var indexing = System.Diagnostics.Stopwatch.GetTimestamp();
-            var video = manifest.GetVideoOnlyStreams().Where(s => s.Container.Name == "mp4" && s.VideoResolution.Height <= height)
-                .OrderByDescending(s => s.VideoResolution.Height)
-                .ThenByDescending(s => s.VideoCodec.StartsWith("avc", StringComparison.OrdinalIgnoreCase))
-                .ThenByDescending(s => s.VideoQuality.Framerate is > 0 and <= 30)
-                .ThenByDescending(s => s.Bitrate).FirstOrDefault();
-            var audio = PreferOriginalAudio(manifest.GetAudioOnlyStreams().Where(s => s.Container.Name == "mp4"))
-                .ThenByDescending(s => s.Bitrate).FirstOrDefault();
-            var progressive = PreferOriginalAudio(manifest.GetMuxedStreams().Where(s => s.Container.Name == "mp4"
-                    && s.VideoCodec.StartsWith("avc", StringComparison.OrdinalIgnoreCase)
-                    && s.AudioCodec.StartsWith("mp4a", StringComparison.OrdinalIgnoreCase)
-                    && s.VideoResolution.Height <= height && s.Size.Bytes > 0 && AllowedMediaUri(s.Url)
-                    && (video is null || audio is null || (s.VideoResolution.Height >= video.VideoResolution.Height
-                        && (video.VideoQuality.Framerate > 30 || s.VideoQuality.Framerate is > 0 and <= 30)))
-                    && (audio is null || CompatibleAudio(s, audio))))
-                .ThenByDescending(s => s.VideoQuality.Framerate is > 0 and <= 30)
-                .ThenByDescending(s => s.VideoResolution.Height).ThenByDescending(s => s.Bitrate).FirstOrDefault();
-            var expires = DateTimeOffset.UtcNow.AddMinutes(5);
-            if (progressive is not null)
+            if (await _quickFormats.TryGet(id, height, timeout.Token) is { } quick)
             {
-                var identity = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(
-                    $"{progressive.Size.Bytes}|{progressive.VideoCodec}|{progressive.AudioCodec}|{progressive.AudioLanguage?.Name}|{progressive.VideoResolution}")))[..24];
-                _logger.LogInformation("JellyTube selected an unchanged MP4 in {FormatsMs:F0} ms. Audio language {Language}.",
-                    System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds, progressive.AudioLanguage?.Code ?? "unknown");
-                return new(null, new(progressive.Url, progressive.Size.Bytes, identity, progressive.VideoResolution.Height), expires);
+                using var indexDeadline = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);
+                indexDeadline.CancelAfter(TimeSpan.FromSeconds(4));
+                try { return await BuildPlayback(id, height, quick, queued, started, "quick format", indexDeadline.Token); }
+                catch (Exception ex) when (!timeout.IsCancellationRequested
+                    && ex is ProviderException or HttpRequestException or IOException or OperationCanceledException)
+                {
+                    _logger.LogDebug("JellyTube quick formats did not pass the media probe. Trying the full resolver.");
+                }
             }
-            if (video is null || audio is null) throw new ProviderException("No supported audio and video combination is available.");
-            var videoIndex = IndexTrack(id, "video", video, video.VideoCodec, video.VideoResolution.Width, video.VideoResolution.Height, timeout.Token);
-            var audioIndex = IndexTrack(id, "audio", audio, audio.AudioCodec, 0, 0, timeout.Token);
-            await Task.WhenAll(videoIndex, audioIndex);
-            _logger.LogInformation("JellyTube stream lookup waited {QueueMs:F0} ms for capacity, resolved YouTube formats in {FormatsMs:F0} ms, and read media indexes in {IndexMs:F0} ms. Audio language {Language}, original marker {Original}.",
-                System.Diagnostics.Stopwatch.GetElapsedTime(queued, started).TotalMilliseconds,
-                System.Diagnostics.Stopwatch.GetElapsedTime(started, indexing).TotalMilliseconds,
-                System.Diagnostics.Stopwatch.GetElapsedTime(indexing).TotalMilliseconds,
-                audio.AudioLanguage?.Code ?? "unknown", AudioPreference(audio.AudioLanguage?.Name, audio.IsAudioLanguageDefault, audio.Url) == 4);
-            return new(new(await videoIndex, await audioIndex, expires), null, expires);
+            var manifest = await ResolveFormats(id, timeout.Token);
+            return await BuildPlayback(id, height, manifest, queued, started, "full format", timeout.Token);
         }
         catch (Exception ex) when (ex is not (ProviderException or OperationCanceledException))
         { throw new ProviderException("Managed YouTube extraction failed. The video may be restricted or the extractor needs an update."); }
         finally { _slots.Release(); }
     }
+    private async Task<PlaybackSource> BuildPlayback(string id, int height, StreamManifest manifest, long queued, long started,
+        string resolver, CancellationToken ct)
+    {
+        var indexing = System.Diagnostics.Stopwatch.GetTimestamp();
+        var video = manifest.GetVideoOnlyStreams().Where(s => s.Container.Name == "mp4" && s.VideoResolution.Height <= height)
+            .OrderByDescending(s => s.VideoResolution.Height)
+            .ThenByDescending(s => s.VideoCodec.StartsWith("avc", StringComparison.OrdinalIgnoreCase))
+            .ThenByDescending(s => s.VideoQuality.Framerate is > 0 and <= 30)
+            .ThenByDescending(s => s.Bitrate).FirstOrDefault();
+        var audio = PreferOriginalAudio(manifest.GetAudioOnlyStreams().Where(s => s.Container.Name == "mp4"))
+            .ThenByDescending(s => s.Bitrate).FirstOrDefault();
+        var progressive = PreferOriginalAudio(manifest.GetMuxedStreams().Where(s => s.Container.Name == "mp4"
+                && s.VideoCodec.StartsWith("avc", StringComparison.OrdinalIgnoreCase)
+                && s.AudioCodec.StartsWith("mp4a", StringComparison.OrdinalIgnoreCase)
+                && s.VideoResolution.Height <= height && s.Size.Bytes > 0 && AllowedMediaUri(s.Url)
+                && (video is null || audio is null || (s.VideoResolution.Height >= video.VideoResolution.Height
+                    && (video.VideoQuality.Framerate > 30 || s.VideoQuality.Framerate is > 0 and <= 30)))
+                && (audio is null || CompatibleAudio(s, audio))))
+            .ThenByDescending(s => s.VideoQuality.Framerate is > 0 and <= 30)
+            .ThenByDescending(s => s.VideoResolution.Height).ThenByDescending(s => s.Bitrate).FirstOrDefault();
+        var expires = DateTimeOffset.UtcNow.AddMinutes(5);
+        if (progressive is not null)
+        {
+            var identity = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(
+                $"{progressive.Size.Bytes}|{progressive.VideoCodec}|{progressive.AudioCodec}|{progressive.AudioLanguage?.Name}|{progressive.VideoResolution}")))[..24];
+            _logger.LogInformation("JellyTube selected an unchanged MP4 in {FormatsMs:F0} ms. Audio language {Language}.",
+                System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds, progressive.AudioLanguage?.Code ?? "unknown");
+            return new(null, new(progressive.Url, progressive.Size.Bytes, identity, progressive.VideoResolution.Height), expires);
+        }
+        if (video is null || audio is null) throw new ProviderException("No supported audio and video combination is available.");
+        var videoIndex = IndexTrack(id, "video", video, video.VideoCodec, video.VideoResolution.Width, video.VideoResolution.Height, ct);
+        var audioIndex = IndexTrack(id, "audio", audio, audio.AudioCodec, 0, 0, ct);
+        await Task.WhenAll(videoIndex, audioIndex);
+        _logger.LogInformation("JellyTube {Resolver} lookup waited {QueueMs:F0} ms for capacity, resolved YouTube formats in {FormatsMs:F0} ms, and read media indexes in {IndexMs:F0} ms. Audio language {Language}, original marker {Original}.",
+            resolver, System.Diagnostics.Stopwatch.GetElapsedTime(queued, started).TotalMilliseconds,
+            System.Diagnostics.Stopwatch.GetElapsedTime(started, indexing).TotalMilliseconds,
+            System.Diagnostics.Stopwatch.GetElapsedTime(indexing).TotalMilliseconds,
+            audio.AudioLanguage?.Code ?? "unknown", AudioPreference(audio.AudioLanguage?.Name, audio.IsAudioLanguageDefault, audio.Url) == 4);
+        return new(new(await videoIndex, await audioIndex, expires), null, expires);
+    }
+
     private async Task<StreamManifest> ResolveFormats(string id, CancellationToken ct)
     {
         using var attempts = CancellationTokenSource.CreateLinkedTokenSource(ct);

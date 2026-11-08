@@ -44,6 +44,7 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
         services.AddSingleton<Catalog>(); services.AddSingleton<Access>(); services.AddSingleton<NativeLibrary>();
         services.AddSingleton<NativeUserData>();
         services.AddSingleton<SegmentCache>();
+        services.AddSingleton<QuickFormats>();
         services.AddSingleton<ThumbnailCache>();
         services.AddSingleton<LibraryPrivacy>();
         services.AddSingleton<MediaBrowser.Controller.Events.IEventConsumer<Jellyfin.Data.Events.Users.UserCreatedEventArgs>, UserCreatedConsumer>();

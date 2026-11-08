@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.0.16
+
+- Use complete YouTube MP4 formats from a bounded quick lookup and keep the full extractor as a fallback.
+- Reuse visitor data across requests while preserving original audio, resolution, and native playback compatibility.
+
 ## 0.1.0.15
 
 - Put General first in the Home category row and select it by default.
