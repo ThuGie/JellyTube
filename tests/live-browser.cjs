@@ -193,6 +193,34 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
       await page.screenshot({ path: path.join(live, 'account-switch-privacy.png') });
       checks.push({ check: 'late API responses cannot leak the previous account library', passed: true }); await page.close();
     }
+    {
+      const page = await browser.newPage();
+      const channelId = 'UC' + 'a'.repeat(22);
+      let localRecommendations = 0;
+      await page.route('**/JellyTube/Session', async route => {
+        const response = await route.fetch();
+        await route.fulfill({ response, json: { ...await response.json(), youTubeConnected: true, youTubeConfigured: true } });
+      });
+      await page.route('**/JellyTube/Me/YouTube/Subscriptions', route => route.fulfill({ json: [{ id: channelId, name: 'Subscribed channel' }] }));
+      await page.route('**/JellyTube/Channels/' + channelId + '/Uploads', route => route.fulfill({ json: { items: [{
+        id: 'aqz-KE-bpKQ', title: 'Video from a YouTube subscription', channelId, channel: 'Subscribed channel',
+        durationSeconds: 600, publishedAt: '2026-01-01', description: 'Subscription fixture'
+      }] } }));
+      page.on('request', request => {
+        if (/\/JellyTube\/(Me\/Recommendations|Explore\?)/.test(request.url())) localRecommendations++;
+      });
+      await page.goto(s.base + '/web/');
+      await page.locator('#txtManualName').fill('tube-alice');
+      await page.locator('#txtManualPassword').fill(s.password);
+      await page.locator('#txtManualPassword').press('Enter');
+      await page.locator('#jt-launch').click();
+      await page.getByText('Video from a YouTube subscription', { exact: true }).waitFor();
+      await page.getByRole('navigation', { name: 'Home feeds' }).getByRole('button', { name: 'Following', exact: true }).click();
+      await page.getByText('Video from a YouTube subscription', { exact: true }).waitFor();
+      assert.equal(localRecommendations, 0);
+      checks.push({ check: 'connected feeds use subscriptions without requesting local recommendations', passed: true });
+      await page.close();
+    }
     // Dashboard must render inside the normal plugin configuration page.
     const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
     await page.goto(s.base + '/web/'); await page.locator('#txtManualName').fill('tube-admin'); await page.locator('#txtManualPassword').fill(s.password); await page.locator('#txtManualPassword').press('Enter');

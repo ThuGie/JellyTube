@@ -710,8 +710,26 @@
       const loading = el('p', 'jt-small', 'Loading videos…');
       loading.setAttribute('role', 'status');
       feed.replaceChildren(loading);
+      const connectedFeed = session.youTubeConnected && ['for-you', 'following'].includes(kind);
+      let subscribed = [];
+      let remainingSubscriptions = [];
+      if (connectedFeed) {
+        try {
+          const channels = await cachedPage('Me/YouTube/Subscriptions');
+          if (!isCurrent()) return;
+          const offset = channels.length ? Math.floor(Date.now() / 86400000) * 12 % channels.length : 0;
+          const ordered = [...channels.slice(offset), ...channels.slice(0, offset)];
+          subscribed = ordered.slice(0, 12);
+          remainingSubscriptions = ordered.slice(12);
+        } catch (error) {
+          if (!isCurrent()) return;
+          feed.replaceChildren(el('p', 'jt-empty', error.message), button('YouTube connection settings', () => navigate('settings')));
+          return;
+        }
+      }
       const discovery = [dailyTopic(), dailyTopic(2), dailyTopic(4)].map(explorePath);
-      const paths = kind === 'general' || (kind === 'explore' && topic === 'general') ? discovery : kind === 'explore' ? [explorePath(topic)] : kind === 'following'
+      const paths = connectedFeed ? subscribed.map(entry => channelPath(entry.id))
+        : kind === 'general' || (kind === 'explore' && topic === 'general') ? discovery : kind === 'explore' ? [explorePath(topic)] : kind === 'following'
         ? followed.map(channelPath)
         : ['Me/Recommendations/Topics', ...discovery,
           ...[...new Set([...followed, ...watchedChannels])].map(channelPath)];
@@ -729,7 +747,7 @@
       else await all;
       if (!isCurrent()) return;
       const sources = paths.filter(path => ready.has(path)).map(path => ready.get(path));
-      const videos = [], feedOrder = [], seen = new Set(kind === 'for-you' ? watched : []);
+      const videos = [], feedOrder = [], seen = new Set(kind === 'for-you' && !connectedFeed ? watched : []);
       const deferred = [];
       const cards = el('div', 'jt-grid');
       const nodes = new Map();
@@ -752,6 +770,19 @@
         if (!isCurrent()) return;
         const existing = new Set(sources.map(source => source.path));
         sources.push(...paths.filter(path => ready.has(path) && !existing.has(path)).map(path => ready.get(path)));
+        if (candidates().length < 24 && remainingSubscriptions.length) {
+          const extra = remainingSubscriptions.splice(0, 4);
+          const results = await Promise.allSettled(extra.map(entry => cachedPage(channelPath(entry.id))));
+          if (!isCurrent()) return;
+          results.forEach((result, index) => {
+            if (result.status === 'fulfilled') {
+              const path = channelPath(extra[index].id);
+              const source = { path, items: result.value.items, next: result.value.nextPageToken };
+              ready.set(path, source);
+              sources.push(source);
+            }
+          });
+        }
         if (candidates().length < 24) {
           const pageable = sources.filter(source => source.next).slice(0, 4);
           const nextPages = await Promise.allSettled(pageable.map(source =>
@@ -790,13 +821,14 @@
         for (const video of available) {
           const creator = video.channelId || video.channel;
           const count = creators.get(creator) || 0;
-          if (kind === 'for-you' && count >= 3) { deferred.push(video); continue; }
+          if (kind === 'for-you' && !connectedFeed && count >= 3) { deferred.push(video); continue; }
           creators.set(creator, count + 1);
           add(video);
           if (++added === 24) break;
         }
         if (added < 12) for (const video of deferred.slice(0, 12 - added)) add(video);
-        more.hidden = !waiting && sources.length === ready.size && !candidates().length && !sources.some(source => source.next);
+        more.hidden = !waiting && sources.length === ready.size && !candidates().length
+          && !sources.some(source => source.next) && !remainingSubscriptions.length;
         if (videos.length) feed.querySelector('.jt-empty')?.remove();
       }
       function add(video) {
@@ -808,13 +840,15 @@
         cards.append(node);
       }
       feed.replaceChildren(cards, more);
+      if (connectedFeed) feed.prepend(el('p', 'jt-small', 'Uploads from your YouTube subscriptions'));
       append();
       if (!videos.length) {
         feed.prepend(el('p', 'jt-empty', paths.length && !sources.length
           ? 'This feed is temporarily unavailable.'
+          : connectedFeed && !subscribed.length ? 'Your connected YouTube account has no subscriptions.'
           : kind === 'following' && !followed.length ? 'Follow a channel to see uploads here.'
           : kind === 'explore' ? 'No relevant videos match this topic and format on this page.' : 'No videos match this format yet.'));
-        if (kind === 'following' && !followed.length) feed.append(button('Find channels', () => {
+        if (!connectedFeed && kind === 'following' && !followed.length) feed.append(button('Find channels', () => {
           searchState = { query: '', kind: 'channels', items: [], next: null };
           return navigate('search');
         }, 'jt-primary'));
@@ -865,7 +899,26 @@
       session.settings = await api('Me/Settings', 'PUT', { maxHeight: Number(height[1].value), view: view[1].value, language: lang[1].value, region: region[1].value.toUpperCase(), safeSearch: safe[1].value, autoplay: autoplay[1].checked, recordHistory: record[1].checked });
       message('Preferences saved.');
     }, 'jt-primary'));
-    form.onsubmit = e => e.preventDefault(); main.append(form, el('h2', '', 'Your data'));
+    form.onsubmit = e => e.preventDefault(); main.append(form, el('h2', '', 'YouTube account'));
+    if (session.youTubeConnected) {
+      main.append(el('p', '', 'Connected. For You and Following show uploads from your YouTube subscriptions.'));
+      main.append(button('Refresh subscriptions', async () => {
+        const subscriptions = await api('Me/YouTube/Subscriptions', 'POST');
+        message(`Refreshed ${subscriptions.length} YouTube subscriptions.`);
+      }));
+      main.append(button('Disconnect YouTube', async () => {
+        await api('Me/YouTube', 'DELETE');
+        session.youTubeConnected = false;
+        await navigate('settings');
+        message('YouTube disconnected.');
+      }));
+    }
+    if (session.youTubeConfigured) main.append(button(session.youTubeConnected ? 'Reconnect YouTube' : 'Connect YouTube', async () => {
+      const result = await api('Me/YouTube/Connect', 'POST');
+      location.assign(result.url);
+    }, 'jt-primary'));
+    else if (!session.youTubeConnected) main.append(el('p', 'jt-small', 'An administrator can enable YouTube connections in JellyTube setup.'));
+    main.append(el('h2', '', 'Your data'));
     main.append(button('Export my JellyTube data', async () => { const data = await api('Me/Export'); const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })); const a = el('a'); a.href = url; a.download = 'jellytube-data.json'; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); }), button('Clear recent viewing', async () => { await api('Me/History', 'DELETE'); await refreshLibrary(); message('JellyTube recent viewing cleared.'); }));
   }
   async function renderAdmin() {
@@ -886,9 +939,12 @@
     const media = field('Dedicated server folder outside existing shared libraries', c.mediaRoot), budget = field('Storage budget in MiB', c.storageBudgetMb, 'number');
     const downloads = field('Allow retained video downloads', c.enableDownloads, 'checkbox'), searches = field('Daily server search budget', c.searchCallsPerDay, 'number'), userLimit = field('Daily search budget per user', c.userSearchCallsPerDay, 'number');
     const apiKey = field(c.apiKeyPresent ? 'Replace optional YouTube API key (leave blank to keep)' : 'Optional YouTube Data API key', '', 'password');
+    const oauthId = field('Google OAuth client ID (optional)', c.youTubeClientId);
+    const oauthSecret = field(c.youTubeClientSecretConfigured ? 'Google OAuth client secret (leave blank to keep)' : 'Google OAuth client secret', '', 'password');
     const minimumSafe = select('Minimum SafeSearch (official video discovery only)', c.minimumSafeSearch, [['moderate', 'Moderate'], ['strict', 'Strict']]);
-    for (const f of [base, media, budget, downloads, searches, userLimit, apiKey, minimumSafe]) form.append(f[0]);
-    form.append(button('Save setup', async () => { await api('Admin/Settings', 'PUT', { publicBaseUrl: base[1].value, mediaRoot: media[1].value, storageBudgetMb: Number(budget[1].value), enableDownloads: downloads[1].checked, searchCallsPerDay: Number(searches[1].value), userSearchCallsPerDay: Number(userLimit[1].value), deniedUsers: c.deniedUsers, downloadDeniedUsers: c.downloadDeniedUsers, minimumSafeSearch: minimumSafe[1].value, apiKey: apiKey[1].value || null }); message('Setup saved.'); }, 'jt-primary'));
+    for (const f of [base, media, budget, downloads, searches, userLimit, apiKey, minimumSafe, oauthId, oauthSecret]) form.append(f[0]);
+    form.append(el('p', 'jt-small', 'Google OAuth redirect URI for the saved Jellyfin URL'), el('code', '', c.youTubeCallback));
+    form.append(button('Save setup', async () => { await api('Admin/Settings', 'PUT', { publicBaseUrl: base[1].value, mediaRoot: media[1].value, storageBudgetMb: Number(budget[1].value), enableDownloads: downloads[1].checked, searchCallsPerDay: Number(searches[1].value), userSearchCallsPerDay: Number(userLimit[1].value), deniedUsers: c.deniedUsers, downloadDeniedUsers: c.downloadDeniedUsers, minimumSafeSearch: minimumSafe[1].value, apiKey: apiKey[1].value || null, youTubeClientId: oauthId[1].value, youTubeClientSecret: oauthSecret[1].value || null }); await navigate('admin'); message('Setup saved.'); }, 'jt-primary'));
     form.onsubmit = e => e.preventDefault(); main.append(form, el('h2', '', 'Shared JellyTube library'));
     main.append(el('p', '', 'Everyone with library access can browse its videos. Favorites, history, playlists and download ownership stay with each account.'));
     main.append(button(

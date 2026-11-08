@@ -37,6 +37,8 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
     {
         services.AddTransient<Microsoft.AspNetCore.Hosting.IStartupFilter, JellyTubeStartupFilter>();
         services.AddHttpClient("JellyTube.Catalog", c => c.Timeout = TimeSpan.FromSeconds(20)).RemoveAllLoggers();
+        services.AddHttpClient("JellyTube.Google", c => c.Timeout = TimeSpan.FromSeconds(15))
+            .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false }).RemoveAllLoggers();
         services.AddHttpClient("JellyTube.YouTube", c => c.Timeout = TimeSpan.FromSeconds(45)).RemoveAllLoggers();
         services.AddHttpClient("JellyTube.Media", c => c.Timeout = Timeout.InfiniteTimeSpan)
             .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false, ConnectTimeout = TimeSpan.FromSeconds(15), AutomaticDecompression = System.Net.DecompressionMethods.None }).RemoveAllLoggers();
@@ -45,6 +47,7 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
         services.AddSingleton<NativeUserData>();
         services.AddSingleton<SegmentCache>();
         services.AddSingleton<QuickFormats>();
+        services.AddSingleton<YouTubeAccount>();
         services.AddSingleton<ThumbnailCache>();
         services.AddSingleton<LibraryPrivacy>();
         services.AddSingleton<MediaBrowser.Controller.Events.IEventConsumer<Jellyfin.Data.Events.Users.UserCreatedEventArgs>, UserCreatedConsumer>();

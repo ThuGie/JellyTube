@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.0.17
+
+- Add optional per-user YouTube sign-in and read-only subscription sync.
+- Use YouTube subscription uploads for connected For You and Following feeds and retain local recommendations for disconnected accounts.
+
 ## 0.1.0.16
 
 - Use complete YouTube MP4 formats from a bounded quick lookup and keep the full extractor as a fallback.

@@ -2,6 +2,7 @@ using System.ComponentModel.DataAnnotations;
 using System.Security.Claims;
 using MediaBrowser.Controller.Library;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
 using Microsoft.Extensions.DependencyInjection;
@@ -54,10 +55,11 @@ public sealed record NameRequest(string Name);
 public sealed record ProgressRequest(double PositionSeconds);
 public sealed record DirectProgressRequest(double PositionSeconds, bool Completed = false);
 public sealed record AdminSettings(string PublicBaseUrl, string MediaRoot, long StorageBudgetMb, bool EnableDownloads,
-    int SearchCallsPerDay, int UserSearchCallsPerDay, string[] DeniedUsers, string? ApiKey = null, string[]? DownloadDeniedUsers = null, string MinimumSafeSearch = "moderate");
+    int SearchCallsPerDay, int UserSearchCallsPerDay, string[] DeniedUsers, string? ApiKey = null, string[]? DownloadDeniedUsers = null, string MinimumSafeSearch = "moderate",
+    string? YouTubeClientId = null, string? YouTubeClientSecret = null);
 
 [ApiController, Route("JellyTube"), Authorize, JellyTubeErrors, JellyTubeJson]
-public sealed class JellyTubeController(Store store, Access access, Catalog catalog, Extractor extractor, NativeLibrary native, Downloads downloads, JellyfinMuxer muxer, NativeUserData nativeUserData, LibraryPrivacy privacy) : ControllerBase
+public sealed class JellyTubeController(Store store, Access access, Catalog catalog, Extractor extractor, NativeLibrary native, Downloads downloads, JellyfinMuxer muxer, NativeUserData nativeUserData, LibraryPrivacy privacy, YouTubeAccount youtube) : ControllerBase
 {
     private string Owner()
     {
@@ -86,6 +88,7 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
         var config = Plugin.Instance.Configuration;
         var binding = access.CanUse(owner) ? config.SharedLibrary ?? config.Libraries.FirstOrDefault(l => l.UserId == owner) : null;
         return Ok(new { userId = owner, admin = access.IsAdmin(owner), nativeLibrary = binding is null ? null : new { libraryId = binding.LibraryId },
+            youTubeConfigured = youtube.Configured, youTubeConnected = youtube.Connected(owner),
             downloads = Plugin.Instance.Configuration.EnableDownloads && !Plugin.Instance.Configuration.DownloadDeniedUsers.Contains(owner, StringComparer.OrdinalIgnoreCase), settings = store.Settings(owner),
             minimumSafeSearch = Plugin.Instance.Configuration.MinimumSafeSearch,
             discovery = string.IsNullOrWhiteSpace(Plugin.Instance.Configuration.ApiKey) ? "managed" : "official",
@@ -204,8 +207,43 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
         if (kind == "Favorites") await nativeUserData.SetFavorite(owner, id, true, ct); return NoContent();
     }
     [HttpGet("Me/Recommendations/Topics")]
-    public async Task<ActionResult> TopicRecommendations(CancellationToken ct) =>
-        Ok(extractor.WithCachedDates(await catalog.RecommendTopics(Owner(), ct)));
+    public async Task<ActionResult> TopicRecommendations(CancellationToken ct)
+    {
+        var owner = Owner();
+        return Ok(youtube.Connected(owner) ? new CatalogPage([]) : extractor.WithCachedDates(await catalog.RecommendTopics(owner, ct)));
+    }
+    [HttpPost("Me/YouTube/Connect")]
+    public ActionResult ConnectYouTube()
+    {
+        var (state, url) = youtube.Begin(Owner());
+        Response.Cookies.Append("JellyTubeOAuth", state, new CookieOptions
+        {
+            HttpOnly = true, Secure = true, SameSite = SameSiteMode.Lax, IsEssential = true,
+            Path = new Uri(youtube.Callback).AbsolutePath, MaxAge = TimeSpan.FromMinutes(10)
+        });
+        return Ok(new { url });
+    }
+    [AllowAnonymous, HttpGet("YouTube/Callback")]
+    public async Task<ActionResult> YouTubeCallback([FromQuery] string? state, [FromQuery] string? code, CancellationToken ct)
+    {
+        Response.Headers["Referrer-Policy"] = "no-referrer";
+        if (state is not { Length: 43 } || code is not { Length: > 0 and <= 2048 }
+            || !Request.Cookies.TryGetValue("JellyTubeOAuth", out var cookie) || !string.Equals(state, cookie, StringComparison.Ordinal))
+            return BadRequest("YouTube connection was cancelled or expired. Return to JellyTube and try again.");
+        Response.Cookies.Delete("JellyTubeOAuth", new CookieOptions { Path = new Uri(youtube.Callback).AbsolutePath, Secure = true });
+        await youtube.Complete(state, code, ct);
+        return Redirect(Plugin.Instance.Configuration.PublicBaseUrl.TrimEnd('/') + "/web/#/home");
+    }
+    [HttpGet("Me/YouTube/Subscriptions")]
+    public async Task<ActionResult> YouTubeSubscriptions(CancellationToken ct) => Ok(await youtube.Subscriptions(Owner(), false, ct));
+    [HttpPost("Me/YouTube/Subscriptions")]
+    public async Task<ActionResult> RefreshYouTubeSubscriptions(CancellationToken ct) => Ok(await youtube.Subscriptions(Owner(), true, ct));
+    [HttpDelete("Me/YouTube")]
+    public async Task<ActionResult> DisconnectYouTube(CancellationToken ct)
+    {
+        await youtube.Disconnect(Owner(), ct);
+        return NoContent();
+    }
     [HttpGet("Explore")]
     public async Task<ActionResult> Explore([FromQuery] string topic, [FromQuery] string? page, CancellationToken ct)
     {
@@ -299,10 +337,11 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
         var owner = Owner(); return Ok(new { settings = store.Settings(owner), favorites = store.List<SavedVideo>(owner, "favorite"), watchLater = store.List<SavedVideo>(owner, "later"), playlists = store.List<PersonalPlaylist>(owner, "playlist"), channels = store.List<SavedChannel>(owner, "channel"), history = store.List<HistoryEntry>(owner, "history"), resume = store.List<HistoryEntry>(owner, "resume") });
     }
     [HttpDelete("Me/Data")]
-    public ActionResult ClearData()
+    public async Task<ActionResult> ClearData(CancellationToken ct)
     {
         var owner = Owner(); foreach (var kind in new[] { "favorite", "favoriteSync", "later", "playlist", "channel", "history", "video", "settings", "resume", "direct" }) store.Delete(owner, kind);
         ClearWatchHistory(owner);
+        await youtube.Disconnect(owner, ct);
         return NoContent(); // Retained media and native Jellyfin user data have their own explicit management.
     }
     [HttpGet("Admin/Settings"), Authorize(Policy = "RequiresElevation")]
@@ -312,6 +351,7 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
         return Ok(new { c.PublicBaseUrl, mediaRoot = native.MediaRoot, c.StorageBudgetMb, c.EnableDownloads, c.SearchCallsPerDay, c.UserSearchCallsPerDay,
             c.DeniedUsers, c.DownloadDeniedUsers, c.MinimumSafeSearch, apiKeyPresent = !string.IsNullOrWhiteSpace(c.ApiKey),
             sharedLibrary = c.SharedLibrary, legacyLibraryCount = c.Libraries.Count,
+            youTubeClientId = c.YouTubeClientId, youTubeClientSecretConfigured = !string.IsNullOrEmpty(c.YouTubeClientSecret), youTubeCallback = youtube.Callback,
             users = access.Users().Select(u => new { id = Rules.Owner(u.Id), name = u.Username, admin = access.Administrator(u) }) });
     }
     [HttpPut("Admin/Settings"), Authorize(Policy = "RequiresElevation")]
@@ -328,12 +368,15 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
         foreach (var id in request.DeniedUsers) if (!Guid.TryParseExact(id, "N", out _)) throw new ValidationException("Invalid denied user ID.");
         foreach (var id in request.DownloadDeniedUsers ?? []) if (!Guid.TryParseExact(id, "N", out _)) throw new ValidationException("Invalid download user ID.");
         if (request.MinimumSafeSearch is not ("strict" or "moderate")) throw new ValidationException("Invalid minimum SafeSearch setting.");
+        if (request.YouTubeClientId?.Length > 512 || request.YouTubeClientSecret?.Length > 512) throw new ValidationException("Invalid Google OAuth credentials.");
         var changedUrl = c.PublicBaseUrl != request.PublicBaseUrl.TrimEnd('/');
         var reenabled = c.DeniedUsers.Except(request.DeniedUsers, StringComparer.OrdinalIgnoreCase).ToArray();
         c.PublicBaseUrl = request.PublicBaseUrl.TrimEnd('/'); c.MediaRoot = Path.GetFullPath(request.MediaRoot);
         c.StorageBudgetMb = request.StorageBudgetMb; c.EnableDownloads = request.EnableDownloads; c.SearchCallsPerDay = request.SearchCallsPerDay;
         c.UserSearchCallsPerDay = request.UserSearchCallsPerDay; c.DeniedUsers = request.DeniedUsers.Select(id => Guid.Parse(id).ToString("N")).Distinct().ToArray();
         c.DownloadDeniedUsers = (request.DownloadDeniedUsers ?? c.DownloadDeniedUsers).Select(id => Guid.Parse(id).ToString("N")).Distinct().ToArray(); c.MinimumSafeSearch = request.MinimumSafeSearch;
+        if (request.YouTubeClientId is not null) c.YouTubeClientId = request.YouTubeClientId.Trim();
+        if (request.YouTubeClientSecret is not null) c.YouTubeClientSecret = request.YouTubeClientSecret.Trim();
         if (request.ApiKey is not null) c.ApiKey = request.ApiKey.Trim(); Plugin.Instance.UpdateConfiguration(c);
         await native.RestoreSharedAccess(reenabled);
         await privacy.Enforce();

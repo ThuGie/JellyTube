@@ -7,6 +7,8 @@ namespace Jellyfin.Plugin.JellyTube;
 public sealed class Configuration : BasePluginConfiguration
 {
     public string ApiKey { get; set; } = "";
+    public string YouTubeClientId { get; set; } = "";
+    public string YouTubeClientSecret { get; set; } = "";
     public string PublicBaseUrl { get; set; } = "";
     public string MediaRoot { get; set; } = "";
     public long StorageBudgetMb { get; set; } = 20480;

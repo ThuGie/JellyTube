@@ -34,6 +34,7 @@ YouTube API credentials are optional. Managed discovery supports video, channel 
 ## Included
 
 - Video, channel and public-playlist search; direct video-ID/link lookup.
+- Optional read-only YouTube account connections. For You and Following show subscription uploads for connected accounts, while disconnected accounts use JellyTube recommendations.
 - Home feeds for recommendations, followed channels, topic discovery, Continue Watching, Watch Later, and Favorites. For You blends multiple interests with discovery and offers more results as you browse.
 - Per-user favorites, Watch Later, named ordered playlists, followed channels, and recent channel uploads.
 - Native video playback with separate audio/video ranges, format-aware source refresh, a bounded range cache and seekable segment timelines.
@@ -42,6 +43,14 @@ YouTube API credentials are optional. Managed discovery supports video, channel 
 - Persistent managed download queue with cancellation, retry, restart recovery, per-user visibility, storage limits, atomic publication and explicit local-copy removal.
 - Data export and separate JellyTube history clearing. Jellyfin's native history/resume settings remain under Jellyfin's control.
 - Admin health, account access, per-user download permissions, shared-library setup, search budgets, minimum official SafeSearch and optional API key configuration.
+
+## Connect a YouTube account
+
+1. In Google Cloud, enable **YouTube Data API v3**, configure the OAuth consent screen, and create a **Web application** OAuth client.
+2. Register the exact HTTPS redirect URI shown in **Dashboard → JellyTube**. It ends in `/JellyTube/YouTube/Callback`. Save the client ID and secret in JellyTube setup. If the Google app is in Testing, add each account as a test user.
+3. Open Jellyfin Web using that same HTTPS base URL. In **JellyTube → Settings**, click **Connect YouTube** and grant read-only access on Google.
+
+Each Jellyfin user connects separately. For You and Following start with a rotating set of up to 12 subscribed channels and load more as you browse. JellyTube leaves manual follows and personal collections intact when you disconnect. Google's API does not expose the personalized YouTube Home feed.
 
 ## Playback and native clients
 
