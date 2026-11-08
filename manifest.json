@@ -9,6 +9,15 @@
     "imageUrl": "https://raw.githubusercontent.com/ThuGie/JellyTube/main/assets/jellytube.png",
     "versions": [
       {
+        "version": "0.1.0.15",
+        "changelog": "- Put General first in the Home category row and select it by default.\n- Keep direct playback, resume, saved videos, and downloads private without adding native library items.\n- Exclude JellyTube's shared library from Recently Added and ask before adding a video for native playback.",
+        "targetAbi": "10.11.3.0",
+        "sourceUrl": "https://github.com/ThuGie/JellyTube/releases/download/v0.1.0.15/JellyTube_0.1.0.15.zip",
+        "checksum": "dc9971ea8f880a99bcdf0ce04749b521",
+        "timestamp": "2026-11-08T00:19:40Z",
+        "dependencies": []
+      },
+      {
         "version": "0.1.0.14",
         "changelog": "- Play supported streams directly in Jellyfin Web, with per-user resume and a native player fallback.\n- Respect Jellyfin playback permissions and administrator-required transcoding.\n- Default shared streaming to 1080p and prefer resolution before frame rate.\n- Add a General feed and wait for a mix of sources on For You.\n- Generate useful manifest changelogs and fill in previous releases.",
         "targetAbi": "10.11.3.0",

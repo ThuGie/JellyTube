@@ -5,7 +5,7 @@
   "overview": "YouTube, inside Jellyfin",
   "owner": "ThuGie",
   "category": "General",
-  "version": "0.1.0.14",
+  "version": "0.1.0.15",
   "targetAbi": "10.11.3.0",
   "autoUpdate": true,
   "imagePath": "thumb.png",
@@ -14,6 +14,6 @@
     "YoutubeExplode.dll",
     "Jellyfin.Plugin.JellyTube.dll"
   ],
-  "timestamp": "2026-11-07T23:58:09Z",
-  "changelog": "- Play supported streams directly in Jellyfin Web, with per-user resume and a native player fallback.\n- Respect Jellyfin playback permissions and administrator-required transcoding.\n- Default shared streaming to 1080p and prefer resolution before frame rate.\n- Add a General feed and wait for a mix of sources on For You.\n- Generate useful manifest changelogs and fill in previous releases."
+  "timestamp": "2026-11-08T00:19:40Z",
+  "changelog": "- Put General first in the Home category row and select it by default.\n- Keep direct playback, resume, saved videos, and downloads private without adding native library items.\n- Exclude JellyTube's shared library from Recently Added and ask before adding a video for native playback."
 }
