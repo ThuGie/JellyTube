@@ -5,7 +5,7 @@
   "overview": "YouTube, inside Jellyfin",
   "owner": "ThuGie",
   "category": "General",
-  "version": "0.1.0.21",
+  "version": "0.1.0.22",
   "targetAbi": "10.11.3.0",
   "autoUpdate": true,
   "imagePath": "thumb.png",
@@ -14,6 +14,6 @@
     "YoutubeExplode.dll",
     "Jellyfin.Plugin.JellyTube.dll"
   ],
-  "timestamp": "2026-11-19T13:16:14Z",
-  "changelog": "- Load connected Explore categories directly from Google's category charts with complete video metadata.\n- Allow unrelated searches to run concurrently and include descriptions with official search results.\n- Bound stream lookup time, clean up failed pending lookups, and offer direct-playback retry with a visible error."
+  "timestamp": "2026-11-19T13:21:07Z",
+  "changelog": "- Add Open on YouTube and Copy video link in video details, plus a YouTube link in the player.\n- Log direct source lookup duration and failures with the source request's reference."
 }

@@ -9,6 +9,15 @@
     "imageUrl": "https://raw.githubusercontent.com/ThuGie/JellyTube/main/assets/jellytube.png",
     "versions": [
       {
+        "version": "0.1.0.22",
+        "changelog": "- Add Open on YouTube and Copy video link in video details, plus a YouTube link in the player.\n- Log direct source lookup duration and failures with the source request's reference.",
+        "targetAbi": "10.11.3.0",
+        "sourceUrl": "https://github.com/ThuGie/JellyTube/releases/download/v0.1.0.22/JellyTube_0.1.0.22.zip",
+        "checksum": "35b9c26bfbe22300260ea93e8884c2b5",
+        "timestamp": "2026-11-19T13:21:07Z",
+        "dependencies": []
+      },
+      {
         "version": "0.1.0.21",
         "changelog": "- Load connected Explore categories directly from Google's category charts with complete video metadata.\n- Allow unrelated searches to run concurrently and include descriptions with official search results.\n- Bound stream lookup time, clean up failed pending lookups, and offer direct-playback retry with a visible error.",
         "targetAbi": "10.11.3.0",
