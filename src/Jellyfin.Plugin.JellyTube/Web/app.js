@@ -14,11 +14,23 @@
     const response = await fetch(ApiClient.getUrl('JellyTube/' + path), { method, headers, signal, keepalive, credentials: 'same-origin', body: body === undefined ? undefined : JSON.stringify(body) });
     const data = response.status === 204 ? null : await response.json().catch(() => null);
     if (owner !== account()) throw new Error('The account changed. Reopen JellyTube to continue.');
-    if (!response.ok) throw new Error(data?.error || data?.Message || `Request failed (${response.status})`);
+    if (!response.ok) {
+      const error = new Error(data?.error || data?.Message || `Request failed (${response.status})`);
+      error.code = data?.code; error.retryable = !!data?.retryable; error.reference = data?.reference;
+      throw error;
+    }
     if (method !== 'GET' && /^(Me\/(?:Settings|Channels|History|Favorites|YouTube|Data)|Admin\/Settings)/.test(path)) feedPages.clear();
     return data;
   };
-  const message = (text, error = false) => { if (!status) return; status.className = 'jt-status' + (error ? ' jt-error' : ''); status.textContent = text; };
+  const message = (text, error = false) => {
+    if (!status) return;
+    status.className = 'jt-status' + (error ? ' jt-error' : '');
+    status.setAttribute('role', error ? 'alert' : 'status');
+    status.replaceChildren();
+    if (!text) return;
+    status.append(el('span', '', text));
+    if (error) { const close = button('×', () => message('')); close.setAttribute('aria-label', 'Close error'); status.append(close); }
+  };
   const button = (label, action, cls = '') => {
     const b = el('button', cls, label); b.type = 'button'; b.onclick = async event => { event.stopPropagation(); b.disabled = true; try { await action(b); } catch (e) { message(e.message, true); } finally { b.disabled = false; } }; return b;
   };
@@ -76,6 +88,20 @@
     }).catch(error => { dashBundle = null; throw error; });
     return dashBundle;
   }
+  function playbackError(info, sequence, error) {
+    if (!root) return;
+    const focus = document.activeElement;
+    const dialog = el('dialog', 'jt-details jt-playback-error');
+    dialog.setAttribute('aria-label', 'Playback failed');
+    const dismiss = () => { if (directPlayer === dialog) directPlayer = null; dialog.close(); dialog.remove(); focus?.focus({ preventScroll: true }); };
+    const close = button('Close', dismiss, 'jt-primary'); close.setAttribute('aria-label', 'Close playback error');
+    dialog.append(el('h2', '', 'Could not play this video'), el('strong', '', info.title), el('p', 'jt-error-copy', error.message),
+      close, button('Retry video', () => { dismiss(); return play(info, sequence); }),
+      settingsLink('Open on YouTube', 'https://www.youtube.com/watch?v=' + encodeURIComponent(info.id)));
+    dialog.addEventListener('cancel', event => { event.preventDefault(); dismiss(); });
+    dialog.addEventListener('close', dismiss, { once: true });
+    root.append(dialog); directPlayer = dialog; dialog.showModal(); close.focus();
+  }
   async function play(video, sequence = [video], retries = 1) {
     if (playbackReturn || preparing || directPlayer) return;
     if (!session.nativeLibrary) throw new Error('An administrator needs to set up the shared JellyTube library first.');
@@ -101,12 +127,12 @@
       await nativePlay([result.itemId], result.positionTicks || 0, scope, version, { ...result, started });
     } catch (error) {
       if (version !== generation || scope !== account() || request.signal.reason === 'cancelled') return;
-      if (request.signal.aborted) throw new Error('Jellyfin timed out while preparing the video. Try Play again.');
-      throw error;
+      if (request.signal.aborted) error = new Error('Video preparation timed out. Retry or choose another video.');
+      playbackError(video, sequence, error);
     } finally {
       clearTimeout(timeout);
       notice.remove();
-      preparing = null;
+      if (preparing === request) preparing = null;
     }
   }
   function openDirectPlayer(info, sequence, result, scope, version, started, dashReady) {
@@ -117,18 +143,18 @@
     video.playsInline = true;
     const statusLine = el('p', 'jt-small', 'Connecting directly to the video…');
     statusLine.setAttribute('role', 'status');
-    const request = new AbortController();
+    let request = new AbortController();
     const resume = result.positionTicks / 10000000 || 0;
-    let player, played = false, completed = false, failed = false, savedAt = 0, checkpoint = Promise.resolve(), stalledAt;
+    let player, played = false, completed = false, failed = false, closed = false, savedAt = 0, checkpoint = Promise.resolve(), stalledAt;
     const telemetry = (stage, elapsedMs) => api(`Videos/${info.id}/Telemetry`, 'POST', { stage, elapsedMs, reference: result.reference }).catch(() => {});
     const save = (done = false, keepalive = false) => {
-      if (!played || (completed && !done) || account() !== scope || !Number.isFinite(video.currentTime)) return checkpoint;
+      if (closed || failed || !played || (completed && !done) || account() !== scope || !Number.isFinite(video.currentTime)) return checkpoint;
       const positionSeconds = video.currentTime;
-      const write = () => api(`Videos/${info.id}/Progress`, 'PUT', { positionSeconds, completed: done }, undefined, keepalive);
+      const write = () => account() === scope ? api(`Videos/${info.id}/Progress`, 'PUT', { positionSeconds, completed: done }, undefined, keepalive) : Promise.resolve();
       checkpoint = (keepalive ? write() : checkpoint.then(write)).catch(() => {});
       return checkpoint;
     };
-    const pageHide = () => { save(false, true); };
+    const pageHide = () => { closeDirect(); };
     let startupTimer;
     const retry = button('Retry video', async () => {
       dialog.close();
@@ -138,6 +164,7 @@
     retry.hidden = true;
     const fail = error => {
       if (!dialog.open || failed) return;
+      save(false, true);
       failed = true;
       request.abort();
       video.pause();
@@ -146,7 +173,7 @@
       clearTimeout(startupTimer);
       statusLine.textContent = `${error?.message || 'The stream could not start.'} Reference ${result.reference || 'unavailable'}.`;
       retry.hidden = false;
-      if (!played && result.retries > 0) {
+      if (!played && result.retries > 0 && error?.retryable !== false) {
         statusLine.textContent += ' Retrying once…';
         setTimeout(async () => {
           if (!dialog.open || directPlayer !== dialog || account() !== scope || generation !== version) return;
@@ -158,10 +185,12 @@
     const closeDirect = () => {
       if (directPlayer !== dialog) return checkpoint;
       const saved = save(false, true);
+      closed = true;
       clearTimeout(startupTimer);
       request.abort();
+      video.pause();
       window.removeEventListener('pagehide', pageHide);
-      player?.destroy();
+      player?.destroy(); player = null;
       video.removeAttribute('src');
       video.load();
       directPlayer = null;
@@ -170,6 +199,7 @@
     };
     const playNative = button('Play in Jellyfin', async () => {
       if (!confirm('Play in Jellyfin adds this video to the shared JellyTube library. Continue?')) return;
+      if (request.signal.aborted) request = new AbortController();
       const position = played ? Math.round(video.currentTime * 10000000) : result.positionTicks || 0;
       const nativeResult = await api(`Videos/${info.id}/Prepare?nativePlayback=true`, 'POST', undefined, request.signal);
       if (!dialog.open || account() !== scope || generation !== version) return;
@@ -178,11 +208,14 @@
       if (account() === scope && generation === version)
         await nativePlay([nativeResult.itemId], position, scope, version, { ...nativeResult, started: performance.now() });
     });
-    dialog.append(el('h2', '', info.title), video, statusLine, button('Back', () => dialog.close(), 'jt-primary'), retry, playNative,
+    const playerHeading = el('div', 'jt-player-heading');
+    const closeVideo = button('×', () => { dialog.close(); return closeDirect(); }); closeVideo.setAttribute('aria-label', 'Close video');
+    playerHeading.append(el('h2', '', info.title), closeVideo);
+    dialog.append(playerHeading, video, statusLine, button('Back', () => { dialog.close(); return closeDirect(); }, 'jt-primary'), retry, playNative,
       settingsLink('Open on YouTube', 'https://www.youtube.com/watch?v=' + encodeURIComponent(info.id)));
     dialog.addEventListener('close', closeDirect, { once: true });
     const firstFrame = () => {
-      if (!dialog.open || failed || request.signal.aborted || account() !== scope) return;
+      if (closed || !dialog.open || failed || request.signal.aborted || account() !== scope) return;
       if (!video.videoWidth || !video.videoHeight) return;
       if (!played) {
         const elapsed = performance.now() - started;

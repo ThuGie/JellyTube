@@ -11,6 +11,7 @@ public sealed class SegmentCache : IDisposable
     private readonly SemaphoreSlim _streams = new(6);
     private readonly SemaphoreSlim _longStreams = new(2);
     private readonly KeyedGate _fills = new();
+    public int ActiveStreams => 8 - _streams.CurrentCount - _longStreams.CurrentCount;
     public async Task<IDisposable> Enter(CancellationToken ct, bool interactive = true)
     {
         using var timing = Performance.Measure("media.queue");

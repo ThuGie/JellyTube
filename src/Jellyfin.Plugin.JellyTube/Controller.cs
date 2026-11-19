@@ -44,9 +44,13 @@ public sealed class JellyTubeErrors : ExceptionFilterAttribute
             context.HttpContext.RequestServices.GetRequiredService<ILogger<JellyTubeErrors>>()
                 .LogWarning("JellyTube request {Reference} failed in {Action}: {Status} ({ErrorType}).",
                     context.HttpContext.TraceIdentifier, context.ActionDescriptor.DisplayName, status, ex.GetType().Name);
+            if (context.RouteData.Values["id"] is string videoId && System.Text.RegularExpressions.Regex.IsMatch(videoId, "^[A-Za-z0-9_-]{11}$"))
+                context.HttpContext.RequestServices.GetRequiredService<ILogger<JellyTubeErrors>>()
+                    .LogWarning("JellyTube request {Reference} for video {VideoId}: {Code}; cause {CauseType}.", context.HttpContext.TraceIdentifier,
+                        videoId, (ex as ProviderException)?.Code ?? "timeout", ex.InnerException?.GetType().FullName ?? ex.GetType().FullName);
             error += $" Reference {context.HttpContext.TraceIdentifier}.";
         }
-        context.Result = new JsonResult(new { error, reference = context.HttpContext.TraceIdentifier }, Store.Json) { StatusCode = status };
+        context.Result = new JsonResult(new { error, reference = context.HttpContext.TraceIdentifier, code = (ex as ProviderException)?.Code ?? (ex is OperationCanceledException ? "timeout" : "request"), retryable = (ex as ProviderException)?.Retryable ?? ex is OperationCanceledException }, Store.Json) { StatusCode = status };
         context.ExceptionHandled = true;
     }
 }
@@ -133,6 +137,12 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
         if (!access.IsAdmin(Owner())) throw new UnauthorizedAccessException();
         return Ok(Performance.Snapshot());
     }
+    [HttpGet("Admin/PlaybackResources"), Authorize(Policy = "RequiresElevation")]
+    public ActionResult PlaybackResources()
+    {
+        if (!access.IsAdmin(Owner())) throw new UnauthorizedAccessException();
+        return Ok(extractor.Resources);
+    }
     [HttpDelete("Admin/PlaybackCache/{id}"), Authorize(Policy = "RequiresElevation")]
     public ActionResult ClearPlaybackCache(string id)
     {
@@ -161,6 +171,7 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
         if (!access.CanPlayDirect(owner)) return Ok(new { requiresNative = true });
         using var timing = Performance.Measure("playback.start");
         var video = await Video(owner, id, ct);
+        if (video.DurationSeconds is <= 0) throw new ProviderException("Live or upcoming videos are not supported yet.", "unsupported");
         var asset = native.PrepareDirect(owner, video);
         return Ok(new { directPlayback = true, video, positionTicks = nativeUserData.PlaybackPosition(owner, id),
             reference = HttpContext.TraceIdentifier, source = await Source(owner, asset, ct) });
@@ -189,8 +200,6 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         Rules.VideoId(id);
         var height = store.Settings(owner).MaxHeight;
-        if (warm && downloads.PlaybackFile(id, height, store.Get<MediaAsset>(owner, "asset", id), minimumHeight: height) is null)
-            _ = extractor.WarmAdaptive(id, height);
         var video = await Video(owner, id, ct);
         var asset = directPlayback ? native.PrepareDirect(owner, video) : await native.Prepare(owner, video, ct);
         var prepareMs = System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds;

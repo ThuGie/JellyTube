@@ -6,16 +6,22 @@ using YoutubeExplode.Videos.Streams;
 
 namespace Jellyfin.Plugin.JellyTube;
 
-public sealed class ProviderException(string message) : Exception(message);
+public class ProviderException(string message, string code = "provider", bool retryable = false, Exception? inner = null) : Exception(message, inner)
+{
+    public string Code { get; } = code;
+    public bool Retryable { get; } = retryable;
+}
 
 /// <summary>Pure managed extraction; no downloader or JavaScript runtime process.</summary>
-public sealed class Extractor
+public sealed class Extractor : IDisposable
 {
     private readonly YoutubeClient _youtube;
+    private readonly YoutubeClient _playbackYoutube;
     private readonly SemaphoreSlim _slots = new(2);
     private readonly ConcurrentDictionary<string, Lazy<Task<ExtractedSource>>> _pending = new();
     private readonly ConcurrentDictionary<string, ExtractedSource> _cache = new();
-    private readonly ConcurrentDictionary<string, Lazy<Task<PlaybackSource>>> _adaptivePending = new();
+    private readonly SharedWork<PlaybackSource> _adaptivePending = new();
+    private readonly HttpClient _managedClient;
     private readonly ConcurrentDictionary<string, PlaybackSource> _adaptiveCache = new();
     private readonly ConcurrentDictionary<string, (DateTimeOffset Expires, VideoInfo Video)> _details = new();
     private readonly IHttpClientFactory _http;
@@ -27,27 +33,23 @@ public sealed class Extractor
     private readonly KeyedGate _detailGate = new();
     private readonly SemaphoreSlim _detailSlots = new(2);
     public Extractor(IHttpClientFactory http, SegmentCache segments, ILogger<Extractor> logger, QuickFormats quickFormats, Store store, EnumerationPages pages)
-    { _pages = pages; _store = store; _http = http; _segments = segments; _logger = logger; _quickFormats = quickFormats; _youtube = new(http.CreateClient("JellyTube.YouTube")); }
+    { _pages = pages; _store = store; _http = http; _segments = segments; _logger = logger; _quickFormats = quickFormats; _managedClient = new(new ManifestHttpHandler(http.CreateClient("JellyTube.YouTube"))) { Timeout = Timeout.InfiniteTimeSpan }; _playbackYoutube = new(_managedClient); _youtube = new(http.CreateClient("JellyTube.YouTube")); }
     public async Task<PlaybackSource> ResolvePlayback(string id, int maxHeight, CancellationToken ct)
     {
         Rules.VideoId(id); var key = id + ":" + maxHeight;
         if (_adaptiveCache.TryGetValue(key, out var cached) && cached.ExpiresAt > DateTimeOffset.UtcNow.AddSeconds(15)) { Performance.Record("playback.source.hit", 0); return cached; }
-        var pending = _adaptivePending.GetOrAdd(key, _ => new(() => AdaptiveCore(id, maxHeight)));
-        var task = pending.Value;
-        _ = task.ContinueWith(completed =>
+        return await _adaptivePending.Run(key, async token =>
         {
-            _ = completed.Exception;
-            if (completed.IsCompletedSuccessfully) _adaptiveCache[key] = completed.Result;
-            _adaptivePending.TryRemove(new KeyValuePair<string, Lazy<Task<PlaybackSource>>>(key, pending));
-        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
-        try
-        {
-            var source = await task.WaitAsync(ct);
-            if (_adaptiveCache.Count >= 200) foreach (var old in _adaptiveCache.OrderBy(x => x.Value.ExpiresAt).Take(50)) _adaptiveCache.TryRemove(old.Key, out _);
-            _adaptiveCache[key] = source; return source;
-        }
-        finally { if (pending.IsValueCreated && pending.Value.IsCompleted) _adaptivePending.TryRemove(new KeyValuePair<string, Lazy<Task<PlaybackSource>>>(key, pending)); }
+            // A caller can arrive after another worker populated the cache but before its entry retired.
+            if (_adaptiveCache.TryGetValue(key, out var warm) && warm.ExpiresAt > DateTimeOffset.UtcNow.AddSeconds(15)) return warm;
+            var source = await AdaptiveCore(id, maxHeight, token);
+            token.ThrowIfCancellationRequested();
+            if (_adaptiveCache.Count >= 200) foreach (var old in _adaptiveCache.OrderBy(pair => pair.Value.ExpiresAt).Take(50)) _adaptiveCache.TryRemove(old.Key, out _);
+            _adaptiveCache[key] = source;
+            return source;
+        }, ct);
     }
+    public object Resources => new { resolving = 2 - _slots.CurrentCount, interestedLookups = _adaptivePending.Count, mediaRequests = _segments.ActiveStreams };
     public void InvalidateAdaptive(string id, int height) => _adaptiveCache.TryRemove(id + ":" + height, out _);
     internal async Task WarmAdaptive(string id, int height)
     {
@@ -57,12 +59,18 @@ public sealed class Extractor
             // Preparation is best effort. The manifest request can retry and report playback errors.
         }
     }
-    private async Task<PlaybackSource> AdaptiveCore(string id, int height)
+    private async Task<PlaybackSource> AdaptiveCore(string id, int height, CancellationToken caller)
     {
         using var timing = Performance.Measure("playback.resolve");
         var queued = System.Diagnostics.Stopwatch.GetTimestamp();
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-        await _slots.WaitAsync(timeout.Token);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(caller); timeout.CancelAfter(TimeSpan.FromSeconds(14));
+        using (var queue = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token))
+        {
+            queue.CancelAfter(TimeSpan.FromSeconds(2));
+            try { await _slots.WaitAsync(queue.Token); }
+            catch (OperationCanceledException) when (!timeout.IsCancellationRequested)
+            { throw new ProviderException("Playback preparation is busy. Try again shortly.", "busy", true); }
+        }
         try
         {
             var started = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -77,11 +85,20 @@ public sealed class Extractor
                     _logger.LogDebug("JellyTube quick formats did not pass the media probe. Trying the full resolver.");
                 }
             }
-            var manifest = await ResolveFormats(id, timeout.Token);
+            using var fullDeadline = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);
+            fullDeadline.CancelAfter(TimeSpan.FromSeconds(8));
+            var manifest = await ResolveFormats(id, fullDeadline.Token);
             return await BuildPlayback(id, height, manifest, queued, started, "full format", timeout.Token);
         }
+        catch (OperationCanceledException) when (!caller.IsCancellationRequested)
+        { throw new ProviderException("YouTube did not supply a stream in time. Retry this video or choose another.", "timeout", true); }
         catch (Exception ex) when (ex is not (ProviderException or OperationCanceledException))
-        { throw new ProviderException("Managed YouTube extraction failed. The video may be restricted or the extractor needs an update."); }
+        {
+            _logger.LogWarning("JellyTube extraction for video {VideoId} failed with {ErrorType} ({ErrorCode:X8}).", id, ex.GetType().FullName, ex.HResult);
+            var unavailable = ex is YoutubeExplode.Exceptions.VideoUnavailableException or YoutubeExplode.Exceptions.VideoUnplayableException;
+            throw new ProviderException(unavailable ? "YouTube reports that this video is unavailable or restricted." : "YouTube stream lookup failed. Retry this video or choose another.",
+                unavailable ? "unavailable" : "extraction", !unavailable && ex is HttpRequestException or IOException, ex);
+        }
         finally { _slots.Release(); }
     }
     private async Task<PlaybackSource> BuildPlayback(string id, int height, StreamManifest manifest, long queued, long started,
@@ -104,6 +121,7 @@ public sealed class Extractor
                 && (audio is null || CompatibleAudio(s, audio))))
             .ThenByDescending(s => s.VideoQuality.Framerate is > 0 and <= 30)
             .ThenByDescending(s => s.VideoResolution.Height).ThenByDescending(s => s.Bitrate).FirstOrDefault();
+        if (progressive is not null && !await ValidateProgressive(progressive, ct)) progressive = null;
         var expires = StreamExpiry(progressive is not null ? [progressive.Url] : new[] { video?.Url, audio?.Url }.OfType<string>(), DateTimeOffset.UtcNow);
         if (progressive is not null)
         {
@@ -125,10 +143,22 @@ public sealed class Extractor
         return new(new(await videoIndex, await audioIndex, expires), null, expires, audio.AudioLanguage?.Code);
     }
 
+    private async Task<bool> ValidateProgressive(MuxedStreamInfo stream, CancellationToken ct)
+    {
+        if (!AllowedMediaUri(stream.Url)) return false;
+        using var request = new HttpRequestMessage(HttpMethod.Get, stream.Url);
+        request.Headers.Range = new(0, Math.Min(65535, stream.Size.Bytes - 1));
+        using var response = await _http.CreateClient("JellyTube.Media").SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+        var length = response.Content.Headers.ContentRange?.Length ?? (response.StatusCode == System.Net.HttpStatusCode.OK ? response.Content.Headers.ContentLength : null);
+        if (!response.IsSuccessStatusCode || length != stream.Size.Bytes) return false;
+        await using var input = await response.Content.ReadAsStreamAsync(ct);
+        var header = new byte[8];
+        return await input.ReadAtLeastAsync(header, 8, false, ct) == 8 && header.AsSpan(4).SequenceEqual("ftyp"u8);
+    }
     private async Task<StreamManifest> ResolveFormats(string id, CancellationToken ct)
     {
         using var timing = Performance.Measure("playback.formats.full");
-        return await _youtube.Videos.Streams.GetManifestAsync(id, ct);
+        return await _playbackYoutube.Videos.Streams.GetManifestAsync(id, ct);
     }
     internal static DateTimeOffset StreamExpiry(IEnumerable<string> urls, DateTimeOffset now)
     {
@@ -151,9 +181,12 @@ public sealed class Extractor
     private async Task<AdaptiveTrack> IndexTrack(string id, string kind, IStreamInfo stream, string codec, int width, int height, CancellationToken ct)
     {
         if (!AllowedMediaUri(stream.Url)) throw new ProviderException("The provider returned an unsupported media destination.");
-        using var request = new HttpRequestMessage(HttpMethod.Get, MediaRangeUri(stream.Url, 0, Math.Min(524287, stream.Size.Bytes - 1)));
+        using var request = new HttpRequestMessage(HttpMethod.Get, stream.Url);
+        request.Headers.Range = new(0, Math.Min(524287, stream.Size.Bytes - 1));
         using var response = await _http.CreateClient("JellyTube.Media").SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
-        if (!response.IsSuccessStatusCode) throw new ProviderException("YouTube refused the stream index. Retry later or update JellyTube.");
+        if (!response.IsSuccessStatusCode) throw new ProviderException("YouTube refused the selected stream. Retry or choose another video.", "stream-denied");
+        var reportedSize = response.Content.Headers.ContentRange?.Length ?? (response.StatusCode == System.Net.HttpStatusCode.OK ? response.Content.Headers.ContentLength : null);
+        if (reportedSize != stream.Size.Bytes) throw new ProviderException("The selected stream has inconsistent size metadata.", "invalid-stream");
         await using var input = await response.Content.ReadAsStreamAsync(ct);
         using var output = new MemoryStream(); var buffer = new byte[16384];
         while (output.Length < 524288)
@@ -401,9 +434,13 @@ public sealed class Extractor
             }
         }
         catch (Exception ex) when (ex is not (ProviderException or OperationCanceledException))
-        { throw new ProviderException("The managed downloader could not complete this video. Retry later or update JellyTube."); }
+        {
+            _logger.LogWarning("JellyTube download extraction for video {VideoId} failed with {ErrorType} ({ErrorCode:X8}).", video.Id, ex.GetType().FullName, ex.HResult);
+            throw new ProviderException("The managed downloader could not complete this video. Retry later or update JellyTube.", "download", false, ex);
+        }
         return actualHeight;
     }
     private sealed class InlineProgress(Action<double> report) : IProgress<double> { public void Report(double value) => report(value); }
+    public void Dispose() => _managedClient.Dispose();
     internal static string Text(JsonElement e, string property, string fallback = "") => e.TryGetProperty(property, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? fallback : fallback;
 }

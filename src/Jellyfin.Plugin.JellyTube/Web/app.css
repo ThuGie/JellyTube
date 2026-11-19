@@ -143,3 +143,13 @@ body.jt-open > .docspinner { display:none !important; }
     background: #ff928d;
     color: #170e0f;
 }
+
+#jt-app .jt-status { display:flex; align-items:center; gap:12px; }
+#jt-app .jt-status:empty { display:none; }
+#jt-app .jt-status button { flex-shrink:0; padding:4px 10px; }
+#jt-app .jt-details { max-height:90vh; overflow:auto; }
+#jt-app .jt-player-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; position:sticky; top:-24px; z-index:2; background:var(--jt-panel); padding:12px 0; }
+#jt-app .jt-player-heading h2 { margin:0; font-size:20px; }
+#jt-app .jt-player-heading button { flex-shrink:0; }
+#jt-app .jt-direct-player video { max-height:58vh; }
+#jt-app .jt-error-copy { white-space:pre-wrap; overflow-wrap:anywhere; }

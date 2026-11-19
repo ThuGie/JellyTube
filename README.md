@@ -58,7 +58,7 @@ Connected Explore tabs use Google's regional category charts and include descrip
 
 Native clients use the shared JellyTube library and its native player. Custom YouTube discovery screens are provided by the web integration; a server plugin cannot add arbitrary search screens to every TV/mobile app. Browsers were tested at desktop and mobile sizes. A mobile browser test is not a physical Android/iOS or TV-app certification.
 
-Shared playback defaults to a 1080p cap and selects resolution before frame rate. The per-user maximum resolution applies to downloads. JellyTube plays supported streams directly in Jellyfin Web and saves progress to the user's Jellyfin account. **Play in Jellyfin** opens the native player, which applies the device profile and the user's normal transcode/remux permissions. Native apps retain their own queue controls.
+Playback defaults to a 1080p cap and selects resolution before frame rate. The per-user maximum resolution applies to streams and downloads. JellyTube plays supported streams directly in Jellyfin Web and saves progress to the user's Jellyfin account. **Play in Jellyfin** opens the native player, which applies the device profile and the user's normal transcode/remux permissions. Native apps retain their own queue controls.
 
 Public on-demand videos are the initial scope. Private, age/region-restricted, live/DVR, DRM and verification-required videos may be unavailable. Personal Google cookies are not imported. YouTube can change extraction behavior; fixes ship as a plugin/dependency update, not a new NAS command-line requirement.
 
@@ -98,6 +98,8 @@ python scripts/verify-integration.py
 python scripts/verify-discovery-download.py
 python scripts/verify-shared-storage.py
 node tests/playback-performance.cjs
+node tests/playback-resources.cjs
+node tests/playback-topics.cjs
 npm run test:browser
 ```
 
@@ -112,6 +114,8 @@ Public metadata is shared by video ID; discovery references, subscriptions, feed
 Direct web playback calls `POST JellyTube/Videos/{id}/Start`, reuses compatible local media or an unexpired stream, and uses the configured quality (1080p by default). It never requires a native library scan. The direct player reports success only after a visible decoded video frame and stops failed or cancelled attempts before retrying. Signed media URLs remain in memory.
 
 Administrators can use the Performance panel or `GET JellyTube/Admin/Performance` to inspect database, provider, playback, and transport timings. Each API response includes `X-JellyTube-Reference`. Client first-frame telemetry uses the playback-start reference. Counters reset on server restart; percentiles cover the most recent 512 measurements per stage. The elevated `DELETE JellyTube/Admin/PlaybackCache/{videoId}` action invalidates only that video's in-memory format lookup cache for diagnostics.
+
+`GET JellyTube/Admin/PlaybackResources` requires administrator elevation and reports active format lookups and media transfers. Closing the direct player stops playback and its media requests. Shared extraction stops when the final interested request disconnects; another viewer of the same source can keep that shared work alive. Preparation errors have Close, Retry, and Open on YouTube controls.
 
 Cached-navigation and playback timing goals are validation targets, not guarantees for cold upstream requests. Synology measurements are required to confirm performance on a particular NAS and network.
 

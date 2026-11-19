@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.0.24
+
+- Give Travel, Food, Technology, and Science distinct topic searches with full metadata and pagination; remove the broad food title filter and unavailable regional Travel-chart dependency.
+- Share public topic snapshots by language, region, and safety policy, and invalidate the old duplicate/empty category pages.
+- Cancel shared stream extraction when its final caller closes or cancels; bound queue waits so abandoned videos cannot hold later Play requests for 20 seconds.
+- Skip validation probes for unselected formats in the managed resolver; validate only the selected audio/video against real media before playback.
+- Follow bounded Googlevideo CDN redirects during index retrieval and streaming, preserving byte ranges without forwarding credentials to other hosts.
+- Add dismissible preparation errors, an always-accessible Close video control, and prevent late pause events from overwriting saved progress with zero.
+- Release local playback readers on request abort and expose active playback resource counts to administrators.
+- Include safe error codes, retryability, video IDs, and underlying exception types in reference-based diagnostics.
+
 ## 0.1.0.23
 
 - Prefer the official API for search, channel pages, public playlists, and missing details whenever account credentials or an API key are available.

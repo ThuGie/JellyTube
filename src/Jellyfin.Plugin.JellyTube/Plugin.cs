@@ -41,6 +41,7 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
             .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false }).RemoveAllLoggers();
         services.AddHttpClient("JellyTube.YouTube", c => c.Timeout = TimeSpan.FromSeconds(45)).RemoveAllLoggers();
         services.AddHttpClient("JellyTube.Media", c => c.Timeout = Timeout.InfiniteTimeSpan)
+            .AddHttpMessageHandler(() => new MediaRedirectHandler())
             .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false, ConnectTimeout = TimeSpan.FromSeconds(15), AutomaticDecompression = System.Net.DecompressionMethods.None }).RemoveAllLoggers();
         services.AddSingleton<Store>(); services.AddSingleton<JellyfinMuxer>(); services.AddSingleton<Extractor>();
         services.AddSingleton<Catalog>(); services.AddSingleton<Access>(); services.AddSingleton<NativeLibrary>();

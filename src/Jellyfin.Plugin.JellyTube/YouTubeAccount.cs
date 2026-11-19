@@ -144,11 +144,11 @@ public sealed partial class YouTubeAccount(Store store, IHttpClientFactory clien
     public async Task<CatalogPage> Explore(string owner, string topic, string? page, CancellationToken ct, bool waitForRefresh = false)
     {
         var settings = store.Settings(owner);
-        var key = CatalogKey(owner, "explore", topic, page);
-        var cached = store.Get<UploadSnapshot>(owner, "youtubeUploads", key);
+        var key = ExploreKey(owner, topic, page);
+        var cached = store.Get<UploadSnapshot>("public", "youtubeExplore", key);
         if (!CanCatalog(owner)) throw new InvalidOperationException("YouTube API access is not configured.");
         if (cached is not null && cached.CreatedAt.AddHours(2) > DateTimeOffset.UtcNow) return cached.Page;
-        var requestKey = owner + ":" + key;
+        var requestKey = "explore:" + key;
         if (_uploadFailures.TryGetValue(requestKey, out var retry) && retry > DateTimeOffset.UtcNow)
         {
             if (cached is not null && cached.CreatedAt.AddHours(24) > DateTimeOffset.UtcNow) return cached.Page;
@@ -177,41 +177,70 @@ public sealed partial class YouTubeAccount(Store store, IHttpClientFactory clien
         }
         finally { _uploadRequests.TryRemove(key, out _); }
     }
+    internal static string TopicQuery(string topic) => topic switch
+    {
+        "technology" => "technology gadgets software computing -wildlife -nature -cooking",
+        "science" => "science nature wildlife astronomy documentary -smartphone -laptop -gadgets -review",
+        "food" => "cooking recipes baking food",
+        "travel" => "travel guide destinations tourism",
+        "music" => "music official live performance",
+        "gaming" => "gaming gameplay walkthrough",
+        "sports" => "sports highlights competition",
+        _ => throw new ArgumentException("Unknown topic.")
+    };
+    private string ExploreKey(string owner, string topic, string? page)
+    {
+        var settings = store.Settings(owner);
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('|', "topics-v2", topic, page,
+            settings.Region, settings.Language, settings.SafeSearch, Plugin.Instance.Configuration.MinimumSafeSearch,
+            Plugin.Instance.Configuration.ApiKey, Plugin.Instance.Configuration.YouTubeClientId))));
+    }
     private async Task<CatalogPage> ReadExplore(string owner, string topic, string? page, CancellationToken ct)
     {
-        var category = topic switch
-        {
-            "music" => "10", "gaming" => "20", "sports" => "17", "travel" => "19",
-            "technology" or "science" => "28", "food" => "26",
-            _ => throw new System.ComponentModel.DataAnnotations.ValidationException("Unknown topic.")
-        };
-        if ((page?.Length ?? 0) > 512) throw new System.ComponentModel.DataAnnotations.ValidationException("Invalid page.");
-        var settings = store.Settings(owner);
-        var cacheKey = CatalogKey(owner, "explore", topic, page);
-        var cached = store.Get<UploadSnapshot>(owner, "youtubeUploads", cacheKey);
+        var query = TopicQuery(topic);
+        if ((page?.Length ?? 0) > 512) throw new ArgumentException("Invalid page.");
+        var key = ExploreKey(owner, topic, page);
+        using var lease = await _catalogGates.Enter("explore:" + key, ct);
+        var cached = store.Get<UploadSnapshot>("public", "youtubeExplore", key);
         if (cached is not null && cached.CreatedAt.AddHours(2) > DateTimeOffset.UtcNow) return cached.Page;
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        deadline.CancelAfter(TimeSpan.FromSeconds(10));
-        try
+        var settings = store.Settings(owner);
+        CatalogPage? result = null;
+        // YouTube combines science/technology, has no food category, and regional Travel charts can be absent.
+        // Those are semantic searches; never relabel the same chart as two different subjects.
+        var category = topic switch { "music" => "10", "gaming" => "20", "sports" => "17", _ => null };
+        if (category is not null)
         {
-            using var json = await CatalogApi(owner, "videos?part=snippet,contentDetails,status&fields=nextPageToken,items(id,snippet(title,channelTitle,channelId,description,publishedAt,tags,categoryId),contentDetails/duration,status/privacyStatus)&chart=mostPopular&maxResults=24&videoCategoryId="
-                + category + "&regionCode=" + Uri.EscapeDataString(settings.Region)
-                + (page is null ? "" : "&pageToken=" + Uri.EscapeDataString(page)), deadline.Token);
-            var videos = json.RootElement.GetProperty("items").EnumerateArray().Where(IsPublic).Select(ParseVideo)
-                .Where(video => topic != "food" || Catalog.MatchesExploreTopic(topic, video.Title)).ToList();
-            var next = Extractor.Text(json.RootElement, "nextPageToken");
-            var result = new CatalogPage(videos, next.Length == 0 ? null : next);
-            using var accountLease = await _gates.Enter(owner, ct);
             try
             {
-                if (CatalogKey(owner, "explore", topic, page) == cacheKey)
-                    { store.Put(owner, "youtubeUploads", cacheKey, new UploadSnapshot(DateTimeOffset.UtcNow, result)); store.Trim(owner, "youtubeUploads", 512); }
+                using var json = await CatalogApi(owner, "videos?part=snippet,contentDetails,status&fields=nextPageToken,items(id,snippet(title,channelTitle,channelId,description,publishedAt,tags),contentDetails/duration,status/privacyStatus)&chart=mostPopular&maxResults=24&videoCategoryId="
+                    + category + "&regionCode=" + Uri.EscapeDataString(settings.Region)
+                    + (page is null ? "" : "&pageToken=" + Uri.EscapeDataString(page)), ct);
+                var videos = json.RootElement.GetProperty("items").EnumerateArray().Where(IsPublic).Select(ParseVideo).ToList();
+                var next = Extractor.Text(json.RootElement, "nextPageToken");
+                if (videos.Count > 0) result = new(videos, next.Length == 0 ? null : next);
             }
-            finally { }
-            return result;
+            catch (ProviderException) { /* Missing charts fall back to the topic query, with a real continuation. */ }
         }
-        catch (Exception ex) when (cached is not null && cached.CreatedAt.AddHours(24) > DateTimeOffset.UtcNow && ex is HttpRequestException or ProviderException or OperationCanceledException)
-        { return cached.Page; }
+        if (result is null)
+        {
+            var config = Plugin.Instance.Configuration;
+            if (!store.ClaimSearch("explore", config.SearchCallsPerDay, config.SearchCallsPerDay, DateTimeOffset.UtcNow))
+                throw new ProviderException("Today's discovery budget has been reached. Saved feeds remain available.", "quota");
+            var safe = config.MinimumSafeSearch == "strict" ? "strict" : settings.SafeSearch;
+            using var search = await CatalogApi(owner, "search?part=snippet&fields=nextPageToken,items(id/videoId)&type=video&maxResults=50&q="
+                + Uri.EscapeDataString(query) + "&regionCode=" + Uri.EscapeDataString(settings.Region)
+                + "&relevanceLanguage=" + Uri.EscapeDataString(settings.Language) + "&safeSearch=" + safe
+                + (page is null ? "" : "&pageToken=" + Uri.EscapeDataString(page)), ct);
+            var ids = search.RootElement.GetProperty("items").EnumerateArray().Select(item => Extractor.Text(item.GetProperty("id"), "videoId")).Where(id => id.Length == 11).Distinct().ToArray();
+            var videos = await CatalogMetadata(owner, ids, ct);
+            var byId = videos.ToDictionary(video => video.Id);
+            var next = Extractor.Text(search.RootElement, "nextPageToken");
+            result = new(ids.Where(byId.ContainsKey).Select(id => byId[id]).ToList(), next.Length == 0 ? null : next);
+        }
+        if (ExploreKey(owner, topic, page) != key) throw new InvalidOperationException("Your discovery settings changed. Retry the page.");
+        store.Put("public", "youtubeExplore", key, new UploadSnapshot(DateTimeOffset.UtcNow, result));
+        store.Trim("public", "youtubeExplore", 256);
+        return result;
     }
 
     private static bool IsPublic(JsonElement item) => item.TryGetProperty("status", out var status)

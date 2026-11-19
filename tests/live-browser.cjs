@@ -79,8 +79,20 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
       assert.equal(await page.locator('#jt-app').evaluate(e => e.scrollWidth <= e.clientWidth), true, 'no horizontal overflow');
       await page.getByRole('button', { name: 'Library', exact: true }).click(); await page.locator('.jt-card').first().waitFor();
       await page.screenshot({ path: path.join(live, name + '-library.png') });
+      const firstPlay = page.locator('.jt-card').first().getByRole('button', { name: '▶ Play', exact: true });
+      await page.route('**/JellyTube/Videos/*/Start', route => route.fulfill({ status: 502,
+        json: { error: 'Unavailable video fixture. Reference fixture-reference.', code: 'unavailable', retryable: false, reference: 'fixture-reference' }
+      }), { times: 1 });
+      await firstPlay.click();
+      const playbackError = page.locator('.jt-playback-error[open]');
+      await playbackError.getByText(/Unavailable video fixture/).waitFor();
+      assert.ok(await playbackError.getByRole('button', { name: 'Close playback error', exact: true }).isVisible());
+      await playbackError.getByRole('button', { name: 'Close playback error', exact: true }).click();
+      await page.locator('.jt-playback-error').waitFor({ state: 'detached' });
+      assert.ok(await firstPlay.isEnabled());
+      checks.push({ check: name + ' preparation errors have an accessible Close control', passed: true });
       if (name === 'desktop') {
-        const play = page.locator('.jt-card').first().getByRole('button', { name: '▶ Play', exact: true });
+        const play = firstPlay;
         const details = page.locator('.jt-card').first().getByRole('button', { name: 'Details', exact: true });
         await details.focus();
         await page.keyboard.press('Enter');
@@ -112,7 +124,7 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
           await route.fulfill({ response, json: { ...await response.json(), source: null } });
         }, { times: 1 });
         await page.route('**/JellyTube/Videos/*/Source', route => route.fulfill({
-          status: 502, json: { error: 'YouTube source fixture unavailable' }
+          status: 502, json: { error: 'YouTube source fixture unavailable', retryable: true }
         }), { times: 1 });
         const sourceFailure = page.waitForResponse(response => /\/JellyTube\/Videos\/[^/]+\/Source$/.test(response.url()) && response.status() === 502);
         const directStarted = performance.now();
@@ -120,6 +132,7 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
         await sourceFailure;
         const direct = page.locator('.jt-direct-player[open]');
         await direct.getByText(/Direct playback ·/).waitFor({ timeout: 70000 });
+        assert.ok(await direct.getByRole('button', { name: 'Close video', exact: true }).isVisible());
         const directFirstFrameMs = Math.round(performance.now() - directStarted);
         await direct.locator('video').evaluate(video => { video.currentTime = 12; });
         await page.waitForFunction(() => {

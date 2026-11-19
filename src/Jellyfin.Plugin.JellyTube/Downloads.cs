@@ -69,8 +69,10 @@ public sealed class Downloads(Store store, Extractor extractor, JellyfinMuxer mu
             if (path is null || _pendingDeletion.Contains(path)) return null;
             var stream = File.OpenRead(path);
             _readers[path] = _readers.GetValueOrDefault(path) + 1;
-            response.OnCompleted(() =>
+            var released = 0;
+            void Release()
             {
+                if (Interlocked.Exchange(ref released, 1) != 0) return;
                 stream.Dispose();
                 lock (_gate)
                 {
@@ -80,8 +82,9 @@ public sealed class Downloads(Store store, Extractor extractor, JellyfinMuxer mu
                         if (_pendingDeletion.Remove(path)) DeleteUnused(path);
                     }
                 }
-                return Task.CompletedTask;
-            });
+            }
+            var aborted = response.HttpContext.RequestAborted.Register(Release);
+            response.OnCompleted(() => { aborted.Dispose(); Release(); return Task.CompletedTask; });
             return stream;
         }
     }

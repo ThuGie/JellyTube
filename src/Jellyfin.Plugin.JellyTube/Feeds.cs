@@ -42,7 +42,7 @@ public sealed class Feeds(Store store, YouTubeAccount youtube, Catalog catalog, 
     }
     private FeedPage Response(FeedSnapshot value, bool stale, bool refreshing) =>
         new(store.EnrichVideos(value.Page.Items), value.Page.NextPageToken, value.Version, value.CreatedAt, stale, refreshing);
-    private string Policy(string owner) => Hash(JsonSerializer.Serialize(store.Settings(owner), Store.Json) + "|" +
+    private string Policy(string owner) => Hash("topics-v2|" + JsonSerializer.Serialize(store.Settings(owner), Store.Json) + "|" +
         youtube.ConnectionVersion(owner) + "|" + Plugin.Instance.Configuration.MinimumSafeSearch + "|" + Plugin.Instance.Configuration.ApiKey + "|" +
         string.Join(',', store.List<SavedChannel>(owner, "channel").Select(c => c.Channel.Id)) + "|" +
         store.Get<DateTimeOffset?>(owner, "historyClear", "current"));
