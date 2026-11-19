@@ -1,13 +1,13 @@
 using System.Collections.Concurrent;
 using System.ComponentModel.DataAnnotations;
-using System.Text.Json;
 
 namespace Jellyfin.Plugin.JellyTube;
 
-public sealed class Catalog(Store store, Extractor extractor, IHttpClientFactory http)
+public sealed class Catalog(Store store, Extractor extractor, YouTubeAccount youtube)
 {
-    private readonly SemaphoreSlim[] _searchGates = Enumerable.Range(0, 32).Select(_ => new SemaphoreSlim(1)).ToArray();
-    private readonly SemaphoreSlim _topicGate = new(1);
+    private readonly KeyedGate _searchGates = new();
+    private readonly SemaphoreSlim _discovery = new(4);
+    private readonly KeyedGate _topicGate = new();
     private readonly ConcurrentDictionary<string, (DateTimeOffset Expires, CatalogPage Page)> _cache = new();
     private sealed record TopicResult(DateTimeOffset CreatedAt, DateTimeOffset? HistoryClearedAt, string Policy, CatalogPage Page);
 
@@ -15,7 +15,7 @@ public sealed class Catalog(Store store, Extractor extractor, IHttpClientFactory
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         deadline.CancelAfter(TimeSpan.FromSeconds(15));
-        await _topicGate.WaitAsync(deadline.Token);
+        using var topicLease = await _topicGate.Enter(owner, deadline.Token);
         try
         {
             var settings = store.Settings(owner);
@@ -28,7 +28,7 @@ public sealed class Catalog(Store store, Extractor extractor, IHttpClientFactory
             var cleared = store.Get<DateTimeOffset?>(owner, "historyClear", "current");
             var config = Plugin.Instance.Configuration;
             var policy = string.Join('|', "multi-topic-v1", settings.RecordHistory, settings.Region, settings.Language, settings.SafeSearch,
-                config.MinimumSafeSearch, !string.IsNullOrWhiteSpace(config.ApiKey));
+                config.MinimumSafeSearch, !string.IsNullOrWhiteSpace(config.ApiKey), string.Join(',', seeds.Select(v => v.Id)));
             var now = DateTimeOffset.UtcNow;
             var cached = store.Get<TopicResult>(owner, "topicRecommendations", "current");
             if (cached is null || cached.CreatedAt.AddHours(8) <= now || cached.HistoryClearedAt != cleared || cached.Policy != policy)
@@ -36,7 +36,7 @@ public sealed class Catalog(Store store, Extractor extractor, IHttpClientFactory
                 var tagSets = await Task.WhenAll(seeds.Select(async video =>
                 {
                     if (video.Tags is { Length: > 0 } tags) return tags;
-                    try { return (await extractor.Details(video.Id, deadline.Token)).Tags ?? []; }
+                    try { return (youtube.CanCatalog(owner) ? await youtube.CatalogDetails(owner, video.Id, deadline.Token) : await extractor.Details(video.Id, deadline.Token)).Tags ?? []; }
                     catch (ProviderException) { return []; }
                 }));
                 var topics = tagSets.SelectMany(tags => tags.Select(tag => tag.Trim()).Distinct(StringComparer.OrdinalIgnoreCase))
@@ -68,10 +68,9 @@ public sealed class Catalog(Store store, Extractor extractor, IHttpClientFactory
             }
             var watched = history.Select(entry => entry.Video.Id).ToHashSet(StringComparer.Ordinal);
             var items = cached.Page.Items.Where(video => !watched.Contains(video.Id)).Take(48).ToList();
-            foreach (var video in items) store.Put(owner, "video", video.Id, video);
-            return new(items);
+            return new(store.CacheVideos(owner, items));
         }
-        finally { _topicGate.Release(); }
+        finally { }
     }
 
     private static bool GenericTopic(string value) =>
@@ -80,6 +79,7 @@ public sealed class Catalog(Store store, Extractor extractor, IHttpClientFactory
 
     public async Task<CatalogPage> Explore(string owner, string topic, string? page, CancellationToken ct)
     {
+        if (youtube.CanCatalog(owner)) return await youtube.Explore(owner, topic, page, ct);
         var query = topic switch
         {
             "technology" => "technology explained",
@@ -119,71 +119,22 @@ public sealed class Catalog(Store store, Extractor extractor, IHttpClientFactory
     public async Task<CatalogPage> Search(string owner, string query, string? page, CancellationToken ct, TimeSpan? cacheDuration = null)
     {
         query = query.Trim(); if (query.Length is < 2 or > 150 || (page?.Length ?? 0) > 500) throw new ValidationException("Enter a search between 2 and 150 characters.");
+        if (youtube.CanCatalog(owner)) return await youtube.CatalogVideos(owner, "search", query, page, ct);
         var settings = store.Settings(owner); var config = Plugin.Instance.Configuration;
         var key = string.Join('|', query, page, settings.Region, settings.Language, settings.SafeSearch, config.MinimumSafeSearch, string.IsNullOrEmpty(config.ApiKey) ? "extractor" : "official");
-        var gate = _searchGates[(int)((uint)StringComparer.Ordinal.GetHashCode(key) % (uint)_searchGates.Length)];
+
         if (_cache.TryGetValue(key, out var cached) && cached.Expires > DateTimeOffset.UtcNow) return cached.Page;
-        await gate.WaitAsync(ct);
+        using var lease = await _searchGates.Enter(key, ct);
+        await _discovery.WaitAsync(ct);
         try
         {
             if (_cache.TryGetValue(key, out cached) && cached.Expires > DateTimeOffset.UtcNow) return cached.Page;
             if (!store.ClaimSearch(owner, config.SearchCallsPerDay, config.UserSearchCallsPerDay, DateTimeOffset.UtcNow))
                 throw new ProviderException("Today's search budget has been reached. Saved videos and native playback remain available.");
-            CatalogPage result;
-            if (!string.IsNullOrWhiteSpace(config.ApiKey)) result = await OfficialSearch(query, page, settings, ct);
-            else result = await extractor.Search(query, ct, page);
+            var result = await extractor.Search(query, ct, page);
             if (_cache.Count > 200) foreach (var old in _cache.OrderBy(x => x.Value.Expires).Take(50)) _cache.TryRemove(old.Key, out _);
             _cache[key] = (DateTimeOffset.UtcNow + (cacheDuration ?? TimeSpan.FromMinutes(10)), result); return result;
         }
-        finally { gate.Release(); }
-    }
-    private async Task<CatalogPage> OfficialSearch(string query, string? page, UserSettings settings, CancellationToken ct)
-    {
-        var url = "https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&maxResults=20&q=" + Uri.EscapeDataString(query)
-            + "&regionCode=" + settings.Region + "&relevanceLanguage=" + Uri.EscapeDataString(settings.Language)
-            + "&safeSearch=" + (Plugin.Instance.Configuration.MinimumSafeSearch == "strict" ? "strict" : settings.SafeSearch) + "&key=" + Uri.EscapeDataString(Plugin.Instance.Configuration.ApiKey)
-            + (string.IsNullOrEmpty(page) ? "" : "&pageToken=" + Uri.EscapeDataString(page));
-        using var response = await http.CreateClient("JellyTube.Catalog").GetAsync(url, ct);
-        if (!response.IsSuccessStatusCode) throw new ProviderException("YouTube search is unavailable. Check the API key and project quota in administrator settings.");
-        using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
-        var items = new List<VideoInfo>();
-        foreach (var e in doc.RootElement.GetProperty("items").EnumerateArray())
-        {
-            var id = e.GetProperty("id").GetProperty("videoId").GetString()!; Rules.VideoId(id);
-            var snippet = e.GetProperty("snippet");
-            items.Add(new(id, System.Net.WebUtility.HtmlDecode(Extractor.Text(snippet, "title")), Extractor.Text(snippet, "channelTitle"),
-                Extractor.Text(snippet, "channelId"), "https://i.ytimg.com/vi/" + id + "/hqdefault.jpg",
-                Description: Extractor.Text(snippet, "description"),
-                PublishedAt: DateTimeOffset.TryParse(Extractor.Text(snippet, "publishedAt"), out var published) ? published : null));
-        }
-        if (items.Count > 0)
-        {
-            var durationsUrl = "https://www.googleapis.com/youtube/v3/videos?part=snippet,contentDetails&id="
-                + string.Join(',', items.Select(item => item.Id)) + "&key=" + Uri.EscapeDataString(Plugin.Instance.Configuration.ApiKey);
-            try
-            {
-                using var durations = await http.CreateClient("JellyTube.Catalog").GetAsync(durationsUrl, ct);
-                if (durations.IsSuccessStatusCode)
-                {
-                    using var metadata = JsonDocument.Parse(await durations.Content.ReadAsStringAsync(ct));
-                    var lengths = new Dictionary<string, double>(StringComparer.Ordinal);
-                    var snippets = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
-                    foreach (var item in metadata.RootElement.GetProperty("items").EnumerateArray())
-                    {
-                        if (item.TryGetProperty("snippet", out var fullSnippet)) snippets[Extractor.Text(item, "id")] = fullSnippet;
-                        try { lengths[Extractor.Text(item, "id")] = System.Xml.XmlConvert.ToTimeSpan(Extractor.Text(item.GetProperty("contentDetails"), "duration")).TotalSeconds; }
-                        catch (FormatException) { }
-                    }
-                    items = items.Select(item => item with {
-                        DurationSeconds = lengths.TryGetValue(item.Id, out var seconds) ? seconds : item.DurationSeconds,
-                        Description = snippets.TryGetValue(item.Id, out var snippet) ? Extractor.Text(snippet, "description") : item.Description,
-                        Tags = snippets.TryGetValue(item.Id, out var tagsSnippet) && tagsSnippet.TryGetProperty("tags", out var tags)
-                            ? tags.EnumerateArray().Select(tag => tag.GetString() ?? "").Take(30).ToArray() : []
-                    }).ToList();
-                }
-            }
-            catch (Exception ex) when (ex is HttpRequestException or JsonException) { /* Keep search results when duration lookup fails. */ }
-        }
-        return new(items, Extractor.Text(doc.RootElement, "nextPageToken", "") is { Length: > 0 } token ? token : null);
+        finally { _discovery.Release(); }
     }
 }

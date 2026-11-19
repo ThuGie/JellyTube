@@ -54,7 +54,9 @@ public static class Mp4Index
             var reference = BinaryPrimitives.ReadUInt32BigEndian(bytes.Slice(pos, 4));
             var duration = BinaryPrimitives.ReadUInt32BigEndian(bytes.Slice(pos + 4, 4));
             if ((reference & 0x80000000) != 0 || (reference & 0x7fffffff) == 0 || duration == 0) throw new ProviderException("Unsupported nested or empty media segment.");
-            var size = reference & 0x7fffffff; segments.Add(new(next, checked(next + size - 1), duration)); next = checked(next + size);
+            var flags = BinaryPrimitives.ReadUInt32BigEndian(bytes.Slice(pos + 8, 4));
+            var startsWithSap = (flags & 0x80000000) != 0 && (flags & 0x0fffffff) == 0 && ((flags >> 28) & 7) is 1 or 2;
+            var size = reference & 0x7fffffff; segments.Add(new(next, checked(next + size - 1), duration, startsWithSap)); next = checked(next + size);
         }
         return new(range.IndexStart, range.IndexEnd, range.InitEnd, scale, presentation, segments);
     }

@@ -1,37 +1,37 @@
 # Validation and compatibility
 
-Validation date: 7 November 2026. This is a preview, not physical Synology/client certification.
+Candidate: **0.1.0.23**, validated 19 November 2026 on an isolated Windows Jellyfin **10.11.11** server. The plugin targets Jellyfin 10.11.3 APIs and .NET 9. This is not physical Synology certification.
 
-## Verified locally
+## Automated checks
 
-- Clean Release build against Jellyfin 10.11.3 APIs; real plugin loading and execution in an isolated Jellyfin **10.11.11** server.
-- Managed metadata/search/stream extraction from YouTube, with H.264 720p and AAC separate tracks. No external downloader/runtime process was involved.
-- Native Jellyfin playback negotiation, generated DASH manifests, HTTP 206 range transport, both audio/video tracks, and FFmpeg input seeking to 120 seconds.
-- Desktop Chromium: one Play action from JellyTube opened Jellyfin's normal video player and decoded video. This was also checked against a completed local retained copy.
-- Desktop/mobile Chromium layouts, search, favorites, preference saving, personal libraries and embedded administrator dashboard; no browser page errors in the successful integration run. These checks passed with the File Transformation helper DLL disabled: web navigation is self-contained.
-- Alice/Bob libraries are isolated, including direct native item-ID requests. New users do not inherit private libraries; explicitly enabling all libraries through the user-policy endpoint preserves the private-library restriction.
-- Indexing refreshes only the owner’s YouTube tree; a newly prepared native item was ready in 2.63 seconds in one local sample (not a NAS benchmark).
-- Shared-library parent/child overlap is rejected through both body and query path inputs; normal options edits on the owned private library remain allowed.
-- Owner-scoped SQLite settings/collections, restart persistence, optimistic playlist edits, quota concurrency and Pacific-midnight reset, URL/domain/path validation, DASH index parsing and bounded cache behavior are covered by automated tests.
-- Managed text, channel and public-playlist discovery, private follows, upload/playlist browsing, per-user download restrictions, cancellation, and other-user retained-copy deletion checks passed.
-- A real managed download completed; Jellyfin's configured FFmpeg merged the separate tracks into a retained MP4. The native item identity remains stable.
+- 52 .NET tests and three release/catalog tests pass; Release packaging builds without warnings.
+- Official API contract tests cover complete channel cards, continuation, metadata batching and reuse, public/private filtering, playlist privacy, and API-key category charts. Fake Google responses are used; no credentials are included in tests.
+- Real-server integration checks cover shared library access, private favorites and playlists, native item identity, playback negotiation, DASH audio/video, byte ranges, retained playback, and FFmpeg seeking to 120 seconds.
+- Shared-storage checks cover matching concurrent requests, independent cancellation, immediate late reuse, removal during playback, release after an aborted reader, validated legacy migration, different qualities, and restart recovery.
+- Public YouTube discovery checks cover video/channel/playlist search, private follows, uploads, playlist browsing, download restrictions, cancellation, managed downloads, and stream-copy muxing.
+- Desktop/mobile browser checks cover General selection, complete cards, active sorting while loading more, keyboard Details, stalled-start cancellation, startup retry, direct playback, resume, seeking, explicit native playback, return to the originating page, account-switch isolation, connected-feed fixtures, and the embedded dashboard. Successful runs have no page errors.
 
-Machine-readable reports and screenshots are generated under `artifacts/live/`; the live extractor probe is `artifacts/managed-probe.json`. Test credentials are deliberately excluded from distributable documentation.
+Machine-readable reports and screenshots remain under ignored `artifacts/live/`. Test credentials, source capabilities, and signed upstream URLs are excluded from distributable documentation.
 
-## Not yet certified
+## Local playback measurements
 
-- Physical Synology DSM/package permissions, ARM64 execution, hardware acceleration, real Android TV/iOS/Android clients, casting, and sustained multi-viewer NAS load.
-- Universal native YouTube search: rich discovery is the web interface; native apps get ordinary Jellyfin library items.
-- Live streams, DVR, Google account imports/cookies, private videos, guaranteed age/region-restricted playback and subtitle track integration.
-- Formal p95 first-frame/seek performance across NAS models and real networks. The plan's timing targets are goals, not claims based on a single desktop run.
+`tests/playback-performance.cjs` measured the same public video (`V12x80R_t_Y`) at 1080p for 20 cold-format-cache and 20 warm-format-cache starts. All 40 starts decoded a visible video frame on the first click.
 
-Jellyfin's own FFmpeg and device profiles decide remux/transcode behavior. Native client support must be recorded client by client rather than inferred solely from server API compatibility.
+| Measurement | p95 |
+| --- | ---: |
+| Format lookup cache cleared before Play | 354 ms |
+| Warm format lookup | 214 ms |
+| Cached private feed response | 12.4 ms |
 
-## Latest automated run
+The first cold-format attempt took 872 ms. Cold-format tests invalidate the signed-format lookup cache; shared byte-range caches and browser connection pools can remain warm. These are local measurements of the new version, not a matched historical before/after benchmark, a fully cold network test, or a NAS guarantee.
 
-- 26 deterministic .NET tests passed.
-- 29 core live server/playback/privacy checks passed in `integration-report.json`, plus two retained-copy checks when a copy exists.
-- 14 real discovery/download checks passed in `discovery-download-report.json`.
-- 5 browser integration checks passed in `browser-report.json`, including native video playback at both streamed 720p and retained-copy 360p across runs, and a deliberately delayed response across an account change.
+Direct DASH playback does not re-encode media. Resume and seeking align to verified random-access boundaries to avoid Chromium mid-GOP decode failures; playback may resume a few seconds before the saved position. Local and combined MP4 playback retain browser seeking.
 
-These are local checks. CI is configured for Windows and Linux unit/build validation but has not been run on GitHub from this workspace.
+## Remaining verification limits
+
+- Physical Synology DSM/package permissions, ARM64 execution, real NAS CPU/I/O load, and timing over the user's reverse proxy remain unverified.
+- Live Google OAuth subscription/account behavior was not exercised with a real Google account in this isolated setup. Official request/response handling and connected browser behavior have deterministic coverage.
+- Android TV, iOS, Android, casting, hardware decoding, and sustained multi-viewer load need separate device testing.
+- Live/DVR streams, private or restricted YouTube playback, subtitle integration, and YouTube's personalized homepage are outside this release. The official Data API supplies subscriptions and public discovery, not an exact personalized Home feed.
+
+The reported Synology slowdown must be remeasured after installing this version before it can be called resolved.

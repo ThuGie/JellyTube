@@ -17,23 +17,27 @@ public sealed class Extractor
     private readonly ConcurrentDictionary<string, ExtractedSource> _cache = new();
     private readonly ConcurrentDictionary<string, Lazy<Task<PlaybackSource>>> _adaptivePending = new();
     private readonly ConcurrentDictionary<string, PlaybackSource> _adaptiveCache = new();
-    private readonly ConcurrentDictionary<string, (DateTimeOffset Expires, CatalogPage Page)> _uploads = new();
     private readonly ConcurrentDictionary<string, (DateTimeOffset Expires, VideoInfo Video)> _details = new();
     private readonly IHttpClientFactory _http;
     private readonly SegmentCache _segments;
     private readonly ILogger<Extractor> _logger;
     private readonly QuickFormats _quickFormats;
-    public Extractor(IHttpClientFactory http, SegmentCache segments, ILogger<Extractor> logger, QuickFormats quickFormats)
-    { _http = http; _segments = segments; _logger = logger; _quickFormats = quickFormats; _youtube = new(http.CreateClient("JellyTube.YouTube")); }
+    private readonly Store _store;
+    private readonly EnumerationPages _pages;
+    private readonly KeyedGate _detailGate = new();
+    private readonly SemaphoreSlim _detailSlots = new(2);
+    public Extractor(IHttpClientFactory http, SegmentCache segments, ILogger<Extractor> logger, QuickFormats quickFormats, Store store, EnumerationPages pages)
+    { _pages = pages; _store = store; _http = http; _segments = segments; _logger = logger; _quickFormats = quickFormats; _youtube = new(http.CreateClient("JellyTube.YouTube")); }
     public async Task<PlaybackSource> ResolvePlayback(string id, int maxHeight, CancellationToken ct)
     {
         Rules.VideoId(id); var key = id + ":" + maxHeight;
-        if (_adaptiveCache.TryGetValue(key, out var cached) && cached.ExpiresAt > DateTimeOffset.UtcNow.AddMinutes(1)) return cached;
+        if (_adaptiveCache.TryGetValue(key, out var cached) && cached.ExpiresAt > DateTimeOffset.UtcNow.AddSeconds(15)) { Performance.Record("playback.source.hit", 0); return cached; }
         var pending = _adaptivePending.GetOrAdd(key, _ => new(() => AdaptiveCore(id, maxHeight)));
         var task = pending.Value;
         _ = task.ContinueWith(completed =>
         {
             _ = completed.Exception;
+            if (completed.IsCompletedSuccessfully) _adaptiveCache[key] = completed.Result;
             _adaptivePending.TryRemove(new KeyValuePair<string, Lazy<Task<PlaybackSource>>>(key, pending));
         }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         try
@@ -55,6 +59,7 @@ public sealed class Extractor
     }
     private async Task<PlaybackSource> AdaptiveCore(string id, int height)
     {
+        using var timing = Performance.Measure("playback.resolve");
         var queued = System.Diagnostics.Stopwatch.GetTimestamp();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         await _slots.WaitAsync(timeout.Token);
@@ -99,14 +104,14 @@ public sealed class Extractor
                 && (audio is null || CompatibleAudio(s, audio))))
             .ThenByDescending(s => s.VideoQuality.Framerate is > 0 and <= 30)
             .ThenByDescending(s => s.VideoResolution.Height).ThenByDescending(s => s.Bitrate).FirstOrDefault();
-        var expires = DateTimeOffset.UtcNow.AddMinutes(5);
+        var expires = StreamExpiry(progressive is not null ? [progressive.Url] : new[] { video?.Url, audio?.Url }.OfType<string>(), DateTimeOffset.UtcNow);
         if (progressive is not null)
         {
             var identity = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(
                 $"{progressive.Size.Bytes}|{progressive.VideoCodec}|{progressive.AudioCodec}|{progressive.AudioLanguage?.Name}|{progressive.VideoResolution}")))[..24];
             _logger.LogInformation("JellyTube selected an unchanged MP4 in {FormatsMs:F0} ms. Audio language {Language}.",
                 System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds, progressive.AudioLanguage?.Code ?? "unknown");
-            return new(null, new(progressive.Url, progressive.Size.Bytes, identity, progressive.VideoResolution.Height), expires);
+            return new(null, new(progressive.Url, progressive.Size.Bytes, identity, progressive.VideoResolution.Height), expires, progressive.AudioLanguage?.Code);
         }
         if (video is null || audio is null) throw new ProviderException("No supported audio and video combination is available.");
         var videoIndex = IndexTrack(id, "video", video, video.VideoCodec, video.VideoResolution.Width, video.VideoResolution.Height, ct);
@@ -117,34 +122,36 @@ public sealed class Extractor
             System.Diagnostics.Stopwatch.GetElapsedTime(started, indexing).TotalMilliseconds,
             System.Diagnostics.Stopwatch.GetElapsedTime(indexing).TotalMilliseconds,
             audio.AudioLanguage?.Code ?? "unknown", AudioPreference(audio.AudioLanguage?.Name, audio.IsAudioLanguageDefault, audio.Url) == 4);
-        return new(new(await videoIndex, await audioIndex, expires), null, expires);
+        return new(new(await videoIndex, await audioIndex, expires), null, expires, audio.AudioLanguage?.Code);
     }
 
     private async Task<StreamManifest> ResolveFormats(string id, CancellationToken ct)
     {
-        using var attempts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var first = _youtube.Videos.Streams.GetManifestAsync(id, attempts.Token).AsTask();
-        var delay = Task.Delay(TimeSpan.FromSeconds(5), attempts.Token);
-        try
-        {
-            if (await Task.WhenAny(first, delay) == first) return await first;
-            ct.ThrowIfCancellationRequested();
-            // A slow upstream request can hold Jellyfin's probe open. Allow one overlapping retry.
-            var second = _youtube.Videos.Streams.GetManifestAsync(id, attempts.Token).AsTask();
-            var winner = await Task.WhenAny(first, second);
-            var other = winner == first ? second : first;
-            _ = other.ContinueWith(task => { _ = task.Exception; }, CancellationToken.None,
-                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
-            try { return await winner; }
-            catch (Exception ex) when (ex is not OperationCanceledException && !ct.IsCancellationRequested) { return await other; }
-        }
-        finally { attempts.Cancel(); }
+        using var timing = Performance.Measure("playback.formats.full");
+        return await _youtube.Videos.Streams.GetManifestAsync(id, ct);
     }
+    internal static DateTimeOffset StreamExpiry(IEnumerable<string> urls, DateTimeOffset now)
+    {
+        DateTimeOffset? earliest = null;
+        var missingExpiry = false;
+        foreach (var url in urls)
+        {
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) { missingExpiry = true; continue; }
+            var query = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(uri.Query);
+            if (!query.TryGetValue("expire", out var raw) || !long.TryParse(raw.ToString(), out var seconds)
+                || seconds < now.ToUnixTimeSeconds() || seconds > now.AddDays(2).ToUnixTimeSeconds())
+            { missingExpiry = true; continue; }
+            var candidate = DateTimeOffset.FromUnixTimeSeconds(seconds).AddMinutes(-2);
+            if (earliest is null || candidate < earliest) earliest = candidate;
+        }
+        var fallback = now.AddMinutes(5);
+        return earliest is null ? fallback : missingExpiry && earliest > fallback ? fallback : earliest.Value;
+    }
+
     private async Task<AdaptiveTrack> IndexTrack(string id, string kind, IStreamInfo stream, string codec, int width, int height, CancellationToken ct)
     {
         if (!AllowedMediaUri(stream.Url)) throw new ProviderException("The provider returned an unsupported media destination.");
-        using var request = new HttpRequestMessage(HttpMethod.Get, stream.Url);
-        request.Headers.Range = new(0, 524287);
+        using var request = new HttpRequestMessage(HttpMethod.Get, MediaRangeUri(stream.Url, 0, Math.Min(524287, stream.Size.Bytes - 1)));
         using var response = await _http.CreateClient("JellyTube.Media").SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
         if (!response.IsSuccessStatusCode) throw new ProviderException("YouTube refused the stream index. Retry later or update JellyTube.");
         await using var input = await response.Content.ReadAsStreamAsync(ct);
@@ -200,9 +207,27 @@ public sealed class Extractor
         { throw new ProviderException("YouTube stream extraction failed. The video may be restricted or the managed extractor may need an update."); }
         finally { _slots.Release(); }
     }
+    internal static double[] SeekPoints(AdaptiveTrack track)
+    {
+        if (track.Segments is null || track.Timescale == 0) return [];
+        var points = new List<double> { 0 }; ulong time = 0;
+        foreach (var segment in track.Segments)
+        {
+            if (segment.StartsWithSap && time > 0) points.Add(time / (double)track.Timescale);
+            time += segment.Duration;
+        }
+        return points.ToArray();
+    }
+    internal static string MediaRangeUri(string url, long from, long to)
+    {
+        if (!AllowedMediaUri(url) || from < 0 || to < from) throw new ProviderException("Invalid upstream media range.");
+        var value = FormattableString.Invariant($"range={from}-{to}");
+        var pattern = new System.Text.RegularExpressions.Regex(@"(?<=[?&])range=[^&#]*", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        return pattern.IsMatch(url) ? pattern.Replace(url, value, 1) : url + (url.Contains('?') ? "&" : "?") + value;
+    }
     internal static bool AllowedMediaUri(string value) => Uri.TryCreate(value, UriKind.Absolute, out var uri)
         && uri.Scheme == "https" && uri.Port == 443 && string.IsNullOrEmpty(uri.UserInfo)
-        && uri.Host.EndsWith(".googlevideo.com", StringComparison.OrdinalIgnoreCase);
+        && string.IsNullOrEmpty(uri.Fragment) && uri.Host.EndsWith(".googlevideo.com", StringComparison.OrdinalIgnoreCase);
 
     internal static int AudioPreference(string? name, bool? isDefault, string url)
     {
@@ -236,15 +261,23 @@ public sealed class Extractor
     public async Task<VideoInfo> Details(string id, CancellationToken ct)
     {
         Rules.VideoId(id);
+        using var lease = await _detailGate.Enter(id, ct);
+        var persisted = _store.Get<Store.PublicVideo>("public", "metadata", id);
+        if (persisted is { Video.Tags: not null } && persisted.CreatedAt.AddHours(6) > DateTimeOffset.UtcNow) return persisted.Video;
         if (_details.TryGetValue(id, out var cached) && cached.Expires > DateTimeOffset.UtcNow) return cached.Video;
         try
         {
-            var video = await _youtube.Videos.GetAsync(id, ct);
+            await _detailSlots.WaitAsync(ct);
+            YoutubeExplode.Videos.Video video;
+            try { using var timing = Performance.Measure("metadata.lookup"); video = await _youtube.Videos.GetAsync(id, ct); }
+            finally { _detailSlots.Release(); }
             var details = new VideoInfo(id, video.Title, video.Author.ChannelTitle, video.Author.ChannelId,
                 "https://i.ytimg.com/vi/" + id + "/hqdefault.jpg", video.Duration?.TotalSeconds, video.Description,
                 video.UploadDate, video.Keywords.Take(30).ToArray());
             if (_details.Count >= 256) foreach (var old in _details.OrderBy(entry => entry.Value.Expires).Take(64)) _details.TryRemove(old.Key, out _);
             _details[id] = (DateTimeOffset.UtcNow.AddHours(6), details);
+            _store.Put("public", "metadata", id, new Store.PublicVideo(DateTimeOffset.UtcNow, details));
+            _store.Trim("public", "metadata", 5000);
             return details;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -262,23 +295,15 @@ public sealed class Extractor
     }
     public async Task<CatalogPage> Search(string query, CancellationToken ct, string? page = null)
     {
-        var items = new List<VideoInfo>();
-        var offset = PageOffset(page);
-        var remaining = offset;
-        try
-        {
-            await foreach (var video in _youtube.Search.GetVideosAsync(query, ct))
-            {
-                if (remaining-- > 0) continue;
-                var id = video.Id.Value;
-                items.Add(new(id, video.Title, video.Author.ChannelTitle, video.Author.ChannelId,
-                    "https://i.ytimg.com/vi/" + id + "/hqdefault.jpg", video.Duration?.TotalSeconds));
-                if (items.Count == 21) break;
-            }
-            return BoundedPage(items, offset);
-        }
+        try { return await _pages.Get("search:" + query, PageOffset(page), token => SearchItems(query, token), ct); }
         catch (Exception ex) when (ex is not OperationCanceledException)
         { throw new ProviderException("YouTube search is unavailable. Retry later or use a video URL."); }
+    }
+    private async IAsyncEnumerable<VideoInfo> SearchItems(string query, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    {
+        await foreach (var video in _youtube.Search.GetVideosAsync(query, ct))
+            yield return new(video.Id.Value, video.Title, video.Author.ChannelTitle, video.Author.ChannelId,
+                "https://i.ytimg.com/vi/" + video.Id + "/hqdefault.jpg", video.Duration?.TotalSeconds);
     }
     public async Task<ChannelInfo> Channel(string id, CancellationToken ct)
     {
@@ -311,43 +336,29 @@ public sealed class Extractor
     public async Task<CatalogPage> PlaylistVideos(string id, CancellationToken ct, string? page = null)
     {
         if (!System.Text.RegularExpressions.Regex.IsMatch(id, "^[A-Za-z0-9_-]{10,100}$")) throw new System.ComponentModel.DataAnnotations.ValidationException("Invalid playlist ID.");
-        var result = new List<VideoInfo>();
-        var offset = PageOffset(page);
-        var remaining = offset;
-        await foreach (var video in _youtube.Playlists.GetVideosAsync(id, ct))
-        {
-            if (remaining-- > 0) continue;
-            result.Add(new(video.Id, video.Title, video.Author.ChannelTitle, video.Author.ChannelId,
-                "https://i.ytimg.com/vi/" + video.Id + "/hqdefault.jpg", video.Duration?.TotalSeconds));
-            if (result.Count == 21) break;
-        }
-        return BoundedPage(result, offset);
+        return await _pages.Get("playlist:" + id, PageOffset(page), token => PlaylistItems(id, token), ct);
     }
-    private static CatalogPage BoundedPage(List<VideoInfo> items, int offset) =>
-        new(items.Take(20).ToList(), items.Count > 20 && offset + 20 < 500 ? (offset + 20).ToString(System.Globalization.CultureInfo.InvariantCulture) : null);
-
+    private async IAsyncEnumerable<VideoInfo> PlaylistItems(string id, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    {
+        await foreach (var video in _youtube.Playlists.GetVideosAsync(id, ct))
+            yield return new(video.Id, video.Title, video.Author.ChannelTitle, video.Author.ChannelId,
+                "https://i.ytimg.com/vi/" + video.Id + "/hqdefault.jpg", video.Duration?.TotalSeconds);
+    }
     public async Task<CatalogPage> Uploads(string id, CancellationToken ct, string? page = null)
     {
         if (!System.Text.RegularExpressions.Regex.IsMatch(id, "^UC[A-Za-z0-9_-]{22}$")) throw new System.ComponentModel.DataAnnotations.ValidationException("Invalid channel ID.");
-        var offset = PageOffset(page);
-        var key = id + ":" + offset;
-        if (_uploads.TryGetValue(key, out var cached) && cached.Expires > DateTimeOffset.UtcNow) return cached.Page;
-        var result = new List<VideoInfo>();
-        var remaining = offset;
-        await foreach (var video in _youtube.Channels.GetUploadsAsync(id, ct))
-        {
-            if (remaining-- > 0) continue;
-            result.Add(new(video.Id, video.Title, video.Author.ChannelTitle, video.Author.ChannelId,
-                "https://i.ytimg.com/vi/" + video.Id + "/hqdefault.jpg", video.Duration?.TotalSeconds));
-            if (result.Count == 21) break;
-        }
-        var resultPage = BoundedPage(result, offset);
-        if (_uploads.Count >= 100) foreach (var old in _uploads.OrderBy(x => x.Value.Expires).Take(20)) _uploads.TryRemove(old.Key, out _);
-        _uploads[key] = (DateTimeOffset.UtcNow.AddMinutes(15), resultPage); return resultPage;
+        return await _pages.Get("uploads:" + id, PageOffset(page), token => UploadItems(id, token), ct);
     }
-    public async Task Download(VideoInfo video, string directory, int height, JellyfinMuxer muxer, CancellationToken ct, Action<double, string>? report = null)
+    private async IAsyncEnumerable<VideoInfo> UploadItems(string id, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    {
+        await foreach (var video in _youtube.Channels.GetUploadsAsync(id, ct))
+            yield return new(video.Id, video.Title, video.Author.ChannelTitle, video.Author.ChannelId,
+                "https://i.ytimg.com/vi/" + video.Id + "/hqdefault.jpg", video.Duration?.TotalSeconds);
+    }
+    public async Task<int> Download(VideoInfo video, string directory, int height, JellyfinMuxer muxer, CancellationToken ct, Action<double, string>? report = null)
     {
         Rules.VideoId(video.Id); Directory.CreateDirectory(directory);
+        var actualHeight = height;
         try
         {
             var manifest = await _youtube.Videos.Streams.GetManifestAsync(video.Id, ct);
@@ -360,9 +371,21 @@ public sealed class Extractor
             {
                 if (!AllowedMediaUri(v.Url) || !AllowedMediaUri(a.Url)) throw new ProviderException("The provider returned an unsupported download destination.");
                 if (v.Size.Bytes + a.Size.Bytes > 8L * 1024 * 1024 * 1024) throw new ProviderException("This download exceeds the 8 GiB item limit.");
+                actualHeight = v.VideoResolution.Height;
                 var fraction = v.Size.Bytes / (double)(v.Size.Bytes + a.Size.Bytes);
-                await _youtube.Videos.Streams.DownloadAsync(v, Path.Combine(directory, "video-track.mp4"), new InlineProgress(p => report?.Invoke(p * fraction * .95, "Downloading video")), ct);
-                await _youtube.Videos.Streams.DownloadAsync(a, Path.Combine(directory, "audio-track.m4a"), new InlineProgress(p => report?.Invoke((fraction + p * (1 - fraction)) * .95, "Downloading audio")), ct);
+                var progressGate = new object(); double videoProgress = 0, audioProgress = 0;
+                async Task Track(IStreamInfo stream, string file, bool isVideo)
+                {
+                    await _youtube.Videos.Streams.DownloadAsync(stream, Path.Combine(directory, file), new InlineProgress(value =>
+                    {
+                        lock (progressGate)
+                        {
+                            if (isVideo) videoProgress = value; else audioProgress = value;
+                            report?.Invoke((videoProgress * fraction + audioProgress * (1 - fraction)) * .95, "Downloading audio and video");
+                        }
+                    }), ct);
+                }
+                await Task.WhenAll(Track(v, "video-track.mp4", true), Track(a, "audio-track.m4a", false));
                 report?.Invoke(.96, "Merging audio and video");
                 await muxer.Merge(Path.Combine(directory, "video-track.mp4"), Path.Combine(directory, "audio-track.m4a"), Path.Combine(directory, "video.mp4"), ct);
                 File.Delete(Path.Combine(directory, "video-track.mp4")); File.Delete(Path.Combine(directory, "audio-track.m4a"));
@@ -373,11 +396,13 @@ public sealed class Extractor
                     .ThenByDescending(s => s.VideoQuality.MaxHeight).FirstOrDefault() ?? throw new ProviderException("No compatible formats are available.");
                 if (!AllowedMediaUri(combined.Url)) throw new ProviderException("The provider returned an unsupported download destination.");
                 if (combined.Size.Bytes > 8L * 1024 * 1024 * 1024) throw new ProviderException("This download exceeds the 8 GiB item limit.");
+                actualHeight = combined.VideoResolution.Height;
                 await _youtube.Videos.Streams.DownloadAsync(combined, Path.Combine(directory, "video.mp4"), new InlineProgress(p => report?.Invoke(p * .95, "Downloading video")), ct);
             }
         }
         catch (Exception ex) when (ex is not (ProviderException or OperationCanceledException))
         { throw new ProviderException("The managed downloader could not complete this video. Retry later or update JellyTube."); }
+        return actualHeight;
     }
     private sealed class InlineProgress(Action<double> report) : IProgress<double> { public void Report(double value) => report(value); }
     internal static string Text(JsonElement e, string property, string fallback = "") => e.TryGetProperty(property, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? fallback : fallback;

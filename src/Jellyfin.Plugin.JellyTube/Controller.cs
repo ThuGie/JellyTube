@@ -39,7 +39,14 @@ public sealed class JellyTubeErrors : ExceptionFilterAttribute
                 ? $"JellyTube could not read or write the playback files. Check that the Jellyfin package account can write to the configured media folder. Log reference {reference}."
                 : $"JellyTube could not complete this request. Check the Jellyfin server log for reference {reference}.";
         }
-        context.Result = new JsonResult(new { error }, Store.Json) { StatusCode = status };
+        if (status is 408 or 502)
+        {
+            context.HttpContext.RequestServices.GetRequiredService<ILogger<JellyTubeErrors>>()
+                .LogWarning("JellyTube request {Reference} failed in {Action}: {Status} ({ErrorType}).",
+                    context.HttpContext.TraceIdentifier, context.ActionDescriptor.DisplayName, status, ex.GetType().Name);
+            error += $" Reference {context.HttpContext.TraceIdentifier}.";
+        }
+        context.Result = new JsonResult(new { error, reference = context.HttpContext.TraceIdentifier }, Store.Json) { StatusCode = status };
         context.ExceptionHandled = true;
     }
 }
@@ -58,8 +65,8 @@ public sealed record AdminSettings(string PublicBaseUrl, string MediaRoot, long 
     int SearchCallsPerDay, int UserSearchCallsPerDay, string[] DeniedUsers, string? ApiKey = null, string[]? DownloadDeniedUsers = null, string MinimumSafeSearch = "moderate",
     string? YouTubeClientId = null, string? YouTubeClientSecret = null);
 
-[ApiController, Route("JellyTube"), Authorize, JellyTubeErrors, JellyTubeJson]
-public sealed class JellyTubeController(Store store, Access access, Catalog catalog, Extractor extractor, NativeLibrary native, Downloads downloads, JellyfinMuxer muxer, NativeUserData nativeUserData, LibraryPrivacy privacy, YouTubeAccount youtube) : ControllerBase
+[ApiController, Route("JellyTube"), Authorize, JellyTubeErrors, JellyTubeJson, JellyTubeTiming]
+public sealed class JellyTubeController(Store store, Access access, Catalog catalog, Extractor extractor, NativeLibrary native, Downloads downloads, JellyfinMuxer muxer, NativeUserData nativeUserData, LibraryPrivacy privacy, YouTubeAccount youtube, Feeds feeds) : ControllerBase
 {
     private string Owner()
     {
@@ -70,9 +77,9 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
     private async Task<VideoInfo> Video(string owner, string id, CancellationToken ct)
     {
         Rules.VideoId(id);
-        var known = store.Get<VideoInfo>(owner, "video", id) ?? store.Get<MediaAsset>(owner, "asset", id)?.Video;
+        var known = store.CachedVideo(owner, id) ?? store.Get<MediaAsset>(owner, "asset", id)?.Video;
         if (known is not null) return known;
-        var result = await extractor.Details(id, ct); store.Put(owner, "video", id, result); return result;
+        var result = youtube.CanCatalog(owner) ? await youtube.CatalogDetails(owner, id, ct) : await extractor.Details(id, ct); store.CacheVideos(owner, [result]); return result;
     }
     [HttpGet("assets/{name}"), AllowAnonymous]
     public ActionResult Asset(string name) => name switch
@@ -91,18 +98,16 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
             youTubeConfigured = youtube.Configured, youTubeConnected = youtube.Connected(owner),
             downloads = Plugin.Instance.Configuration.EnableDownloads && !Plugin.Instance.Configuration.DownloadDeniedUsers.Contains(owner, StringComparer.OrdinalIgnoreCase), settings = store.Settings(owner),
             minimumSafeSearch = Plugin.Instance.Configuration.MinimumSafeSearch,
-            discovery = string.IsNullOrWhiteSpace(Plugin.Instance.Configuration.ApiKey) ? "managed" : "official",
-            safeSearchAvailable = !string.IsNullOrWhiteSpace(Plugin.Instance.Configuration.ApiKey), version = typeof(Plugin).Assembly.GetName().Version?.ToString() });
+            discovery = youtube.CanCatalog(owner) ? "official" : "managed",
+            safeSearchAvailable = youtube.CanCatalog(owner), version = typeof(Plugin).Assembly.GetName().Version?.ToString() });
     }
     [HttpGet("Search")]
     public async Task<ActionResult> Search([FromQuery] string query, [FromQuery] string? page, CancellationToken ct)
     {
         var owner = Owner();
         if (TryVideo(query, out var id)) return Ok(new CatalogPage([await Video(owner, id, ct)]));
-        var result = extractor.WithCachedDates(await catalog.Search(owner, query, page, ct));
-        foreach (var video in result.Items) store.Put(owner, "video", video.Id, video);
-        // Bound per-user discovery snapshots without touching saved collections.
-        var stale = store.List<VideoInfo>(owner, "video"); if (stale.Count > 1000) foreach (var v in stale.Take(stale.Count - 1000)) store.Delete(owner, "video", v.Id);
+        var result = extractor.WithCachedDates(youtube.CanCatalog(owner) ? await youtube.CatalogVideos(owner, "search", query, page, ct) : await catalog.Search(owner, query, page, ct));
+        result = result with { Items = store.CacheVideos(owner, result.Items) };
         return Ok(result);
     }
     internal static bool TryVideo(string text, out string id)
@@ -118,6 +123,62 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
         else return false;
         try { Rules.VideoId(id); return true; } catch (ValidationException) { return false; }
     }
+    [HttpGet("Me/Feed")]
+    public async Task<ActionResult> Feed([FromQuery] string kind, CancellationToken ct, [FromQuery] string topic = "general", [FromQuery] string? page = null)
+        => Ok(await feeds.Get(Owner(), kind, topic, page, ct));
+
+    [HttpGet("Admin/Performance")]
+    public ActionResult Diagnostics()
+    {
+        if (!access.IsAdmin(Owner())) throw new UnauthorizedAccessException();
+        return Ok(Performance.Snapshot());
+    }
+    [HttpDelete("Admin/PlaybackCache/{id}"), Authorize(Policy = "RequiresElevation")]
+    public ActionResult ClearPlaybackCache(string id)
+    {
+        if (!access.IsAdmin(Owner())) throw new UnauthorizedAccessException();
+        Rules.VideoId(id);
+        foreach (var height in new[] { 360, 480, 720, 1080, 1440, 2160 }) extractor.InvalidateAdaptive(id, height);
+        return NoContent();
+    }
+    [HttpPost("Videos/{id}/Telemetry")]
+    public ActionResult Telemetry(string id, [FromBody] PlaybackTelemetry report)
+    {
+        var owner = Owner(); Rules.VideoId(id);
+        if (store.Get<MediaAsset>(owner, "direct", id) is null) throw new KeyNotFoundException();
+        if (!double.IsFinite(report.ElapsedMs) || report.ElapsedMs < 0 || report.ElapsedMs > 300000
+            || report.Stage is not ("firstFrame" or "rebuffer")) throw new ValidationException("Invalid playback measurement.");
+        Performance.Record("playback." + report.Stage, report.ElapsedMs);
+        if (report.Reference is { Length: > 0 and < 100 } reference && reference.All(c => char.IsAsciiLetterOrDigit(c) || c is ':' or '-'))
+            HttpContext.RequestServices.GetRequiredService<ILogger<JellyTubeController>>()
+                .LogInformation("JellyTube playback {Reference}: {Stage} after {ElapsedMs:F0} ms.", reference, report.Stage, report.ElapsedMs);
+        return NoContent();
+    }
+    [HttpPost("Videos/{id}/Start")]
+    public async Task<ActionResult> Start(string id, CancellationToken ct)
+    {
+        var owner = Owner(); access.Binding(owner); Rules.VideoId(id);
+        if (!access.CanPlayDirect(owner)) return Ok(new { requiresNative = true });
+        using var timing = Performance.Measure("playback.start");
+        var video = await Video(owner, id, ct);
+        var asset = native.PrepareDirect(owner, video);
+        return Ok(new { directPlayback = true, video, positionTicks = nativeUserData.PlaybackPosition(owner, id),
+            reference = HttpContext.TraceIdentifier, source = await Source(owner, asset, ct) });
+    }
+    private async Task<object> Source(string owner, MediaAsset asset, CancellationToken ct)
+    {
+        var height = store.Settings(owner).MaxHeight;
+        asset = asset with { LocalFile = store.Get<MediaAsset>(owner, "asset", asset.Id)?.LocalFile };
+        var path = $"JellyTube/Media/{asset.Owner}/{asset.Id}/{asset.Secret}/";
+        if (downloads.PlaybackFile(asset.Id, height, asset, minimumHeight: height) is not null)
+            return new { mode = "mp4", path = path + "local.mp4?fullQuality=true", height = downloads.LocalHeight(asset.Id, height, asset), audioLanguage = (string?)null };
+        var source = await extractor.ResolvePlayback(asset.Id, height, ct);
+        if (source.Progressive is { } progressive)
+            return new { mode = "mp4", path = path + "progressive.mp4?identity=" + progressive.Identity, height = progressive.Height,
+                audioLanguage = source.AudioLanguage };
+        return new { mode = "dash", path = path + "manifest.mpd?web=true", height = source.Adaptive!.Video.Height,
+            audioLanguage = source.AudioLanguage, seekPoints = Extractor.SeekPoints(source.Adaptive.Video) };
+    }
     [HttpPost("Videos/{id}/Prepare")]
     public async Task<ActionResult> Prepare(string id, CancellationToken ct, [FromQuery] bool warm = true, [FromQuery] bool nativePlayback = false)
     {
@@ -127,7 +188,7 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
         if (!directPlayback && !nativePlayback) return Ok(new { requiresNative = true });
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         Rules.VideoId(id);
-        var height = Plugin.Instance.Configuration.SharedLibrary is null ? store.Settings(owner).MaxHeight : MediaController.SharedStreamHeight;
+        var height = store.Settings(owner).MaxHeight;
         if (warm && downloads.PlaybackFile(id, height, store.Get<MediaAsset>(owner, "asset", id), minimumHeight: height) is null)
             _ = extractor.WarmAdaptive(id, height);
         var video = await Video(owner, id, ct);
@@ -146,28 +207,7 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
         if (!access.CanPlayDirect(owner)) throw new UnauthorizedAccessException("This Jellyfin account requires the native player.");
         Rules.VideoId(id);
         var asset = store.Get<MediaAsset>(owner, "direct", id) ?? throw new KeyNotFoundException("Prepare the video first.");
-        asset = asset with { LocalFile = store.Get<MediaAsset>(owner, "asset", id)?.LocalFile };
-        var height = MediaController.SharedStreamHeight;
-        var path = $"JellyTube/Media/{asset.Owner}/{asset.Id}/{asset.Secret}/";
-        if (downloads.PlaybackFile(id, height, asset, minimumHeight: height) is not null)
-            return Ok(new { mode = "mp4", path = path + "local.mp4?fullQuality=true" });
-        var started = System.Diagnostics.Stopwatch.GetTimestamp();
-        PlaybackSource source;
-        try { source = await extractor.ResolvePlayback(id, height, ct); }
-        catch (Exception error) when (error is ProviderException or OperationCanceledException)
-        {
-            HttpContext.RequestServices.GetRequiredService<ILogger<JellyTubeController>>()
-                .LogWarning("JellyTube direct source {Reference} failed after {ElapsedMs:F0} ms ({ErrorType}).",
-                    HttpContext.TraceIdentifier, System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds, error.GetType().Name);
-            if (ct.IsCancellationRequested) throw;
-            throw new ProviderException($"YouTube could not supply this video's stream. Reference {HttpContext.TraceIdentifier}.");
-        }
-        HttpContext.RequestServices.GetRequiredService<ILogger<JellyTubeController>>()
-            .LogInformation("JellyTube direct source {Reference} resolved in {ElapsedMs:F0} ms.",
-                HttpContext.TraceIdentifier, System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds);
-        if (source.Progressive is { } progressive)
-            return Ok(new { mode = "mp4", path = path + "progressive.mp4?identity=" + progressive.Identity, height = progressive.Height });
-        return Ok(new { mode = "dash", path = path + "manifest.mpd?web=true", height = source.Adaptive!.Video.Height });
+        return Ok(await Source(owner, asset, ct));
     }
     [HttpPut("Videos/{id}/Progress")]
     public ActionResult SaveDirectProgress(string id, [FromBody] DirectProgressRequest request, CancellationToken ct)
@@ -185,16 +225,17 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
     {
         var owner = Owner();
         Rules.VideoId(id);
-        var known = store.Get<VideoInfo>(owner, "video", id);
+        var known = store.CachedVideo(owner, id);
         if (known is { Tags: not null, PublishedAt: not null }) return Ok(known);
-        var details = await extractor.Details(Rules.VideoId(id), ct);
-        store.Put(owner, "video", id, details);
+        var details = youtube.CanCatalog(owner) ? await youtube.CatalogDetails(owner, Rules.VideoId(id), ct) : await extractor.Details(Rules.VideoId(id), ct);
+        store.CacheVideos(owner, [details]);
         return Ok(details);
     }
     [HttpGet("Discover")]
     public async Task<ActionResult> Discover([FromQuery] string query, [FromQuery] string kind, CancellationToken ct)
     {
         var owner = Owner(); query = query.Trim(); if (query.Length is < 2 or > 150) throw new ValidationException("Enter a search between 2 and 150 characters.");
+        if (youtube.CanCatalog(owner)) return Ok(new { items = await youtube.CatalogDiscover(owner, kind, query, ct) });
         var c = Plugin.Instance.Configuration;
         if (!store.ClaimSearch(owner, c.SearchCallsPerDay, c.UserSearchCallsPerDay, DateTimeOffset.UtcNow)) throw new ProviderException("Today's search budget has been reached.");
         return Ok(new { items = await extractor.Discover(query, kind, ct) });
@@ -202,8 +243,8 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
     [HttpGet("Playlists/{id}/Videos")]
     public async Task<ActionResult> PlaylistVideos(string id, CancellationToken ct, [FromQuery] string? page = null)
     {
-        var owner = Owner(); var result = extractor.WithCachedDates(await extractor.PlaylistVideos(id, ct, page));
-        foreach (var v in result.Items) store.Put(owner, "video", v.Id, v); return Ok(result);
+        var owner = Owner(); var result = extractor.WithCachedDates(youtube.CanCatalog(owner) ? await youtube.CatalogVideos(owner, "playlist", id, page, ct) : await extractor.PlaylistVideos(id, ct, page));
+        result = result with { Items = store.CacheVideos(owner, result.Items) }; return Ok(result);
     }
     [HttpGet("Me/Library")]
     public async Task<ActionResult> Library(CancellationToken ct, [FromQuery] bool sync = true)
@@ -261,7 +302,7 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
     {
         var owner = Owner();
         var result = await youtube.Uploads(owner, id, page, ct);
-        foreach (var video in result.Items) store.Put(owner, "video", video.Id, video);
+        result = result with { Items = store.CacheVideos(owner, result.Items) };
         return Ok(result);
     }
     [HttpDelete("Me/YouTube")]
@@ -274,10 +315,10 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
     public async Task<ActionResult> Explore([FromQuery] string topic, [FromQuery] string? page, CancellationToken ct)
     {
         var owner = Owner();
-        var result = extractor.WithCachedDates(youtube.Connected(owner)
+        var result = extractor.WithCachedDates(youtube.CanCatalog(owner)
             ? await youtube.Explore(owner, topic, page, ct)
             : await catalog.Explore(owner, topic, page, ct));
-        foreach (var video in result.Items) store.Put(owner, "video", video.Id, video);
+        result = result with { Items = store.CacheVideos(owner, result.Items) };
         return Ok(result);
     }
     [HttpDelete("Me/{kind:regex(^(Favorites|WatchLater)$)}/{id}")]
@@ -289,13 +330,13 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
     [HttpGet("Channels/{id}/Uploads")]
     public async Task<ActionResult> Uploads(string id, CancellationToken ct, [FromQuery] string? page = null)
     {
-        var owner = Owner(); var result = extractor.WithCachedDates(await extractor.Uploads(id, ct, page));
-        foreach (var v in result.Items) store.Put(owner, "video", v.Id, v); return Ok(result);
+        var owner = Owner(); var result = extractor.WithCachedDates(youtube.CanCatalog(owner) ? await youtube.CatalogVideos(owner, "channel", id, page, ct) : await extractor.Uploads(id, ct, page));
+        result = result with { Items = store.CacheVideos(owner, result.Items) }; return Ok(result);
     }
     [HttpPut("Me/Channels/{id}")]
     public async Task<ActionResult> Follow(string id, CancellationToken ct)
     {
-        var owner = Owner(); store.Put(owner, "channel", id, new SavedChannel(await extractor.Channel(id, ct), DateTimeOffset.UtcNow)); return NoContent();
+        var owner = Owner(); store.Put(owner, "channel", id, new SavedChannel(youtube.CanCatalog(owner) ? await youtube.CatalogChannel(owner, id, ct) : await extractor.Channel(id, ct), DateTimeOffset.UtcNow)); return NoContent();
     }
     [HttpDelete("Me/Channels/{id}")]
     public ActionResult Unfollow(string id) { store.Delete(Owner(), "channel", id); return NoContent(); }
@@ -340,6 +381,7 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
         store.Put(owner, "historyClear", "current", DateTimeOffset.UtcNow);
         store.Delete(owner, "history");
         store.Delete(owner, "topicRecommendations");
+        store.Delete(owner, "feed"); store.Delete(owner, "feedCursor");
     }
     [HttpGet("Me/Downloads")]
     public ActionResult Jobs() => Ok(store.List<DownloadJob>(Owner(), "download").OrderByDescending(j => j.UpdatedAt));
@@ -367,7 +409,7 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
     [HttpDelete("Me/Data")]
     public async Task<ActionResult> ClearData(CancellationToken ct)
     {
-        var owner = Owner(); foreach (var kind in new[] { "favorite", "favoriteSync", "later", "playlist", "channel", "history", "video", "settings", "resume", "direct" }) store.Delete(owner, kind);
+        var owner = Owner(); foreach (var kind in new[] { "favorite", "favoriteSync", "later", "playlist", "channel", "history", "video", "videoRef", "feed", "feedCursor", "settings", "resume", "direct" }) store.Delete(owner, kind);
         ClearWatchHistory(owner);
         await youtube.Disconnect(owner, ct);
         return NoContent(); // Retained media and native Jellyfin user data have their own explicit management.

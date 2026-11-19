@@ -48,6 +48,8 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
         services.AddSingleton<SegmentCache>();
         services.AddSingleton<QuickFormats>();
         services.AddSingleton<YouTubeAccount>();
+        services.AddSingleton<Feeds>();
+        services.AddSingleton<EnumerationPages>();
         services.AddSingleton<ThumbnailCache>();
         services.AddSingleton<LibraryPrivacy>();
         services.AddSingleton<MediaBrowser.Controller.Events.IEventConsumer<Jellyfin.Data.Events.Users.UserCreatedEventArgs>, UserCreatedConsumer>();

@@ -96,7 +96,27 @@ The integration scripts create a dedicated loopback-only server with its own dat
 python scripts/live-test.py --server PATH_TO_JELLYFIN --ffmpeg PATH_TO_ITS_FFMPEG
 python scripts/verify-integration.py
 python scripts/verify-discovery-download.py
+python scripts/verify-shared-storage.py
+node tests/playback-performance.cjs
 npm run test:browser
 ```
 
 `scripts/restart-test.py` validates the recorded test-server identity and process path before restarting only that instance. Credentials and test media stay in ignored `artifacts/` files. The packaged archive is written to `artifacts/releases/` with a SHA-256 checksum. No repository is published automatically.
+
+## Performance and cache behavior
+
+Home uses private persistent feed snapshots and opaque continuation cursors. Cached pages open without waiting for YouTube; stale pages remain visible while a background refresh runs. A refresh button applies new results without moving the cards you are reading. Connected feeds use supported YouTube subscriptions and public category charts, not YouTube's personalized homepage API.
+
+Public metadata is shared by video ID; discovery references, subscriptions, feed snapshots, saved collections, history, and resume remain private. Metadata refreshes after six hours, uploads after 15 minutes, subscriptions after one hour, and category charts after two hours. Transient failures can retain feed snapshots for up to 24 hours. Thumbnail files use a separate 128 MiB disk budget and a bounded memory cache.
+
+Direct web playback calls `POST JellyTube/Videos/{id}/Start`, reuses compatible local media or an unexpired stream, and uses the configured quality (1080p by default). It never requires a native library scan. The direct player reports success only after a visible decoded video frame and stops failed or cancelled attempts before retrying. Signed media URLs remain in memory.
+
+Administrators can use the Performance panel or `GET JellyTube/Admin/Performance` to inspect database, provider, playback, and transport timings. Each API response includes `X-JellyTube-Reference`. Client first-frame telemetry uses the playback-start reference. Counters reset on server restart; percentiles cover the most recent 512 measurements per stage. The elevated `DELETE JellyTube/Admin/PlaybackCache/{videoId}` action invalidates only that video's in-memory format lookup cache for diagnostics.
+
+Cached-navigation and playback timing goals are validation targets, not guarantees for cold upstream requests. Synology measurements are required to confirm performance on a particular NAS and network.
+
+Direct DASH resume and seeking align to the preceding verified random-access frame. Playback can resume a few seconds before the saved position; this avoids mid-frame decoder failures without re-encoding. Local and combined MP4 playback retain normal browser seeking.
+
+The managed probe compares header, query, and combined range behavior without printing signed media URLs: `dotnet run --project tools/ManagedProbe -c Release -- VIDEO_ID` (add `--full` to test the full resolver).
+
+Search, channel uploads, public playlists, and video details use the official Data API when a user is connected or an API key is configured. Complete metadata is fetched in batches of up to 50 IDs. Managed extraction remains available without either credential. API search requests retain the configured daily budgets; playback and subscription uploads do not consume that search budget.

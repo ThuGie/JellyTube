@@ -152,7 +152,7 @@ public sealed class CoreTests : IDisposable
         BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(52), 5000);
         var parsed = Mp4Index.Segments(bytes);
         Assert.Equal(1000U, parsed.Timescale); Assert.Equal(2000UL, parsed.PresentationTime);
-        Assert.Equal(new MediaSegment(160, 659, 5000), Assert.Single(parsed.Segments));
+        Assert.Equal(new MediaSegment(160, 659, 5000, false), Assert.Single(parsed.Segments));
         var track = new AdaptiveTrack("https://hidden.googlevideo.com/media", "avc1.4D4020", 1000, 10000, 640, 360, parsed.Start, parsed.End, parsed.InitEnd, parsed.Timescale, parsed.PresentationTime, parsed.Segments);
         var xml = MediaController.ManifestXml(new(track, track, DateTimeOffset.UtcNow), 5, "https://server/protected/");
         Assert.Contains("SegmentList", xml); Assert.Contains("mediaRange=\"160-659\"", xml); Assert.Contains("presentationTimeOffset=\"2000\"", xml);
@@ -209,5 +209,5 @@ public sealed class CoreTests : IDisposable
         });
         await middleware.InvokeAsync(context); Assert.Equal(new byte[] { 1, 2, 3 }, body.ToArray());
     }
-    public void Dispose() { if (Directory.Exists(_directory)) Directory.Delete(_directory, true); }
+    public void Dispose() { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); if (Directory.Exists(_directory)) Directory.Delete(_directory, true); }
 }

@@ -12,9 +12,11 @@ def call(path,method='GET',data=None,token=None):
 def check(label,passed):
     checks.append({'check':label,'passed':bool(passed)});print(('PASS ' if passed else 'FAIL ')+label,flush=True)
     (live/'discovery-download-report.json').write_text(json.dumps({'checks':checks},indent=2))
+assert base.startswith('http://127.0.0.1:') and call('/System/Info/Public')[1]['Id'] == s['serverId']
 _,settings=call('/JellyTube/Me/Settings');_,admin=call('/JellyTube/Admin/Settings',token=s['token'])
 try:
-    code,videos=call('/JellyTube/Search?query=Blender');check('managed text video search',code==200 and len(videos.get('items',[]))>0)
+    code,_=call('/JellyTube/Admin/Settings','PUT',dict(admin,searchCallsPerDay=10000,userSearchCallsPerDay=1000),s['token']);assert code==204
+    code,videos=call('/JellyTube/Search?query=Blender');check('managed text video search',code==200 and isinstance(videos,dict) and len(videos.get('items',[]))>0);assert code==200
     code,channels=call('/JellyTube/Discover?kind=channels&query=Blender');check('managed channel search',code==200 and len(channels.get('items',[]))>0)
     if code==200 and channels['items']:
         c=channels['items'][0];code,_=call('/JellyTube/Me/Channels/'+c['id'],'PUT');check('follow channel',code==204)
@@ -46,7 +48,7 @@ try:
     else:
         checks[-1]['elapsedSeconds']=round(time.monotonic()-start,3)
         _,after=call('/JellyTube/Videos/'+video+'/Prepare?nativePlayback=true','POST');check('native item identity survives download',before['itemId']==after['itemId'])
-        paths=list((live/'data').glob('**/'+video+'/video.strm'));assert paths;url=paths[0].read_text().strip()
+        strm=pathlib.Path(admin['sharedLibrary']['root'])/video/'video.strm';assert strm.resolve().is_relative_to(live.resolve());url=strm.read_text().strip()
         with urllib.request.urlopen(urllib.request.Request(url,headers={'Range':'bytes=0-4095'}),timeout=30) as r:
             data=r.read();check('retained native transport returns a seekable MP4 range',r.status==206 and len(data)==4096 and data[4:8]==b'ftyp')
         _,bob_settings=call('/JellyTube/Me/Settings',token=bob['token'])

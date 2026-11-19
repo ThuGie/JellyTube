@@ -25,8 +25,8 @@ public sealed class NativeLibrary(Store store, Access access, ILibraryManager li
         .OrderBy(candidate => candidate.Parameters.Length)
         .First().Method;
     private readonly SemaphoreSlim _provision = new(1);
-    private readonly ConcurrentDictionary<string, SemaphoreSlim> _locks = new();
-    private readonly ConcurrentDictionary<string, SemaphoreSlim> _scans = new();
+    private readonly KeyedGate _locks = new();
+    private readonly KeyedGate _scans = new();
     public string MediaRoot => string.IsNullOrWhiteSpace(Plugin.Instance.Configuration.MediaRoot)
         ? Path.Combine(Plugin.Instance.DataFolderPath, "media") : Path.GetFullPath(Plugin.Instance.Configuration.MediaRoot);
 
@@ -144,7 +144,7 @@ public sealed class NativeLibrary(Store store, Access access, ILibraryManager li
             || !string.IsNullOrEmpty(publicUrl.Query) || !string.IsNullOrEmpty(publicUrl.Fragment))
             throw new InvalidOperationException("Set the externally reachable Jellyfin base URL in JellyTube administrator settings.");
         var mediaOwner = binding.UserId;
-        var key = mediaOwner + ":" + video.Id; var gate = _locks.GetOrAdd(key, _ => new(1)); await gate.WaitAsync(ct);
+        var key = mediaOwner + ":" + video.Id; using var assetLease = await _locks.Enter(key, ct);
         string? changingDirectory = null;
         try
         {
@@ -177,15 +177,14 @@ public sealed class NativeLibrary(Store store, Access access, ILibraryManager li
                     new XElement("thumb", asset.Video.Thumbnail)));
                 await File.WriteAllTextAsync(Path.Combine(asset.Directory, "video.nfo"), doc.ToString(), ct);
             }
-            var scanGate = _scans.GetOrAdd(mediaOwner, _ => new(1));
-            await scanGate.WaitAsync(ct);
+            using var scanLease = await _scans.Enter(mediaOwner, ct);
             Video item;
             try
             {
                 var root = GetOrRegisterFolder(binding.Root, library.RootFolder);
                 item = library.FindByPath(strm, false) as Video ?? RegisterVideo(strm, asset.Directory, root, asset.Video);
             }
-            finally { scanGate.Release(); }
+            finally { }
             if (!item.IsVisible(access.User(owner)))
                 throw new UnauthorizedAccessException("Jellyfin did not grant access to this video in the JellyTube library.");
             if (item.Id.ToString("N") != asset.ItemId)
@@ -206,7 +205,7 @@ public sealed class NativeLibrary(Store store, Access access, ILibraryManager li
         finally
         {
             if (changingDirectory is not null) monitor.ReportFileSystemChangeComplete(changingDirectory, false);
-            gate.Release();
+
         }
     }
 
@@ -298,7 +297,7 @@ public sealed class NativeLibrary(Store store, Access access, ILibraryManager li
     {
         var binding = Plugin.Instance.Configuration.Libraries.FirstOrDefault(b => b.UserId == owner)
             ?? throw new InvalidOperationException("The private library is not configured.");
-        var gate = _scans.GetOrAdd(owner, _ => new(1)); await gate.WaitAsync(ct);
+        using var scanLease = await _scans.Enter(owner, ct);
         try
         {
             var folder = library.FindByPath(binding.Root, true) as Folder ?? library.GetItemById(Guid.Parse(binding.LibraryId)) as Folder;
@@ -306,14 +305,14 @@ public sealed class NativeLibrary(Store store, Access access, ILibraryManager li
             // Refresh only this owner's YouTube tree. Never rescan the entire NAS for a Play/Favorite action.
             await folder.ValidateChildren(new Progress<double>(), ct);
         }
-        finally { gate.Release(); }
+        finally { }
     }
     public async Task RewriteUrls(CancellationToken ct)
     {
         foreach (var binding in Plugin.Instance.Configuration.Libraries.Concat(Plugin.Instance.Configuration.SharedLibrary is { } shared ? [shared] : []).ToArray())
             foreach (var asset in store.List<MediaAsset>(binding.UserId, "asset"))
             {
-                var gate = _locks.GetOrAdd(binding.UserId + ":" + asset.Id, _ => new(1)); await gate.WaitAsync(ct);
+                using var assetLease = await _locks.Enter(binding.UserId + ":" + asset.Id, ct);
                 try
                 {
                     var expected = Rules.Inside(binding.Root, Rules.VideoId(asset.Id));
@@ -322,7 +321,7 @@ public sealed class NativeLibrary(Store store, Access access, ILibraryManager li
                     var url = Plugin.Instance.Configuration.PublicBaseUrl.TrimEnd('/') + "/JellyTube/Media/" + binding.UserId + "/" + asset.Id + "/" + asset.Secret + "/manifest.mpd";
                     if (await File.ReadAllTextAsync(path, ct) != url) { await File.WriteAllTextAsync(path + ".tmp", url, ct); File.Move(path + ".tmp", path, true); }
                 }
-                finally { gate.Release(); }
+                finally { }
             }
         foreach (var binding in Plugin.Instance.Configuration.Libraries.ToArray()) await Refresh(binding.UserId, ct);
     }

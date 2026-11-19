@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.0.23
+
+- Prefer the official API for search, channel pages, public playlists, and missing details whenever account credentials or an API key are available.
+- Serve persistent, owner-scoped Home feed snapshots through one paginated request, with stale-content fallback and background refresh.
+- Pool SQLite connections, batch changed records, bound cache eviction, and share public metadata while preserving private discovery references.
+- Validate and normalize Googlevideo range responses; use verified keyframe boundaries for reliable direct resume and seeking.
+- Start direct playback through one request, retain signed streams until their expiry safety margin, preserve configured quality, and measure visible first frames.
+- Stop failed playback attempts completely, retry startup once, preserve original audio and resume, and reserve capacity for interactive media ranges.
+- Persist bounded thumbnails with browser validators and coalesce matching image, discovery, metadata, and media-range requests.
+- Retain managed pagination continuations, keep General selected by default, avoid duration-only Shorts classification, and offer refresh without moving visible cards.
+- Replace recurring media-folder scans with reconciled byte counters; preserve shared transfers when one account cancels and validate legacy copies outside reference locks.
+- Add administrator performance measurements and diagnostic references without recording signed stream URLs or credentials.
+
 ## 0.1.0.22
 
 - Add Open on YouTube and Copy video link in video details, plus a YouTube link in the player.

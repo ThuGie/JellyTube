@@ -15,13 +15,17 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
         const items = Array.from({ length: 36 }, (_, index) => ({
           id: 'feed' + String(index).padStart(7, '0'), title: 'Recommendation ' + index,
           channel: 'Creator ' + index % 12, channelId: 'creator-' + index % 12, durationSeconds: 600,
-          publishedAt: index === 13 ? '2099-02-01' : '2026-01-01', description: 'A video from the recommendation fixture.'
+          publishedAt: index === 28 ? '2100-01-01' : index === 13 ? '2099-02-01' : '2026-01-01', description: 'A video from the recommendation fixture.'
         }));
-        await page.route('**/JellyTube/Me/Recommendations/Topics', route => route.fulfill({ json: { items } }));
-        await page.route('**/JellyTube/Explore?topic=*', route => {
-          const topic = new URL(route.request().url()).searchParams.get('topic');
-          const index = ['technology', 'science', 'music', 'gaming', 'food', 'travel', 'sports'].indexOf(topic);
-          return route.fulfill({ json: { items: [{ ...items[index], title: topic + ' discovery' }] } });
+        await page.route('**/JellyTube/Me/Feed?*', route => {
+          const query = new URL(route.request().url()).searchParams;
+          const topic = query.get('topic');
+          const offset = query.get('page') ? 24 : 0;
+          const selected = topic && topic !== 'general'
+            ? [{ ...items[0], title: topic + ' discovery' }]
+            : items.slice(offset, offset + 24);
+          return route.fulfill({ json: { items: selected, nextPageToken: offset === 0 && selected.length === 24 ? 'fixture-page' : null,
+            snapshotVersion: 'fixture', updatedAt: new Date().toISOString(), stale: false, refreshing: false } });
         });
       }
       await page.goto(s.base + '/web/');
@@ -38,6 +42,7 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
         assert.equal(await page.locator('.jt-card .jt-title').first().textContent(), 'Recommendation 13');
         await page.getByRole('button', { name: 'Load more', exact: true }).scrollIntoViewIfNeeded();
         await page.locator('.jt-card').nth(24).waitFor();
+        assert.equal(await page.locator('.jt-card .jt-title').first().textContent(), 'Recommendation 28', 'new pages respect the active date sort');
         await page.getByLabel('Sort loaded videos').selectOption('oldest');
         assert.notEqual(await page.locator('.jt-card .jt-title').first().textContent(), 'Recommendation 13');
         await page.getByLabel('Sort loaded videos').selectOption('newest');
@@ -68,7 +73,7 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
       await favorite.click(); await expectButton(favorite, '★ Favorited');
       await page.getByRole('button', { name: 'Settings', exact: true }).click();
       await page.getByRole('heading', { name: 'YouTube account', exact: true }).waitFor();
-      await page.getByLabel('Maximum download resolution').selectOption('720');
+      await page.getByLabel('Maximum video resolution').selectOption('720');
       await page.getByRole('button', { name: 'Save preferences', exact: true }).click(); await page.getByText('Preferences saved.', { exact: true }).waitFor();
       await page.screenshot({ path: path.join(live, name + '-settings.png') });
       assert.equal(await page.locator('#jt-app').evaluate(e => e.scrollWidth <= e.clientWidth), true, 'no horizontal overflow');
@@ -87,7 +92,7 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
         assert.equal(await details.evaluate(button => button === document.activeElement), true, 'details restores keyboard focus');
         let release;
         const held = new Promise(resolve => { release = resolve; });
-        const preparation = '**/JellyTube/Videos/*/Prepare';
+        const preparation = '**/JellyTube/Videos/*/Start';
         await page.route(preparation, async route => {
           await held;
           await route.abort().catch(() => {});
@@ -102,13 +107,17 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
         await play.waitFor();
         assert.ok(await play.isVisible());
         checks.push({ check: 'keyboard details and cancelling a stalled playback preparation', passed: true });
+        await page.route('**/JellyTube/Videos/*/Start', async route => {
+          const response = await route.fetch();
+          await route.fulfill({ response, json: { ...await response.json(), source: null } });
+        }, { times: 1 });
         await page.route('**/JellyTube/Videos/*/Source', route => route.fulfill({
           status: 502, json: { error: 'YouTube source fixture unavailable' }
         }), { times: 1 });
-        await play.click();
-        await page.locator('.jt-direct-player').getByText(/YouTube source fixture unavailable/).waitFor();
+        const sourceFailure = page.waitForResponse(response => /\/JellyTube\/Videos\/[^/]+\/Source$/.test(response.url()) && response.status() === 502);
         const directStarted = performance.now();
-        await page.locator('.jt-direct-player').getByRole('button', { name: 'Retry video', exact: true }).click();
+        await play.click();
+        await sourceFailure;
         const direct = page.locator('.jt-direct-player[open]');
         await direct.getByText(/Direct playback ·/).waitFor({ timeout: 70000 });
         const directFirstFrameMs = Math.round(performance.now() - directStarted);
@@ -210,11 +219,13 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
         const response = await route.fetch();
         await route.fulfill({ response, json: { ...await response.json(), youTubeConnected: true, youTubeConfigured: true } });
       });
-      await page.route('**/JellyTube/Me/YouTube/Subscriptions', route => route.fulfill({ json: [{ id: channelId, name: 'Subscribed channel' }] }));
-      await page.route('**/JellyTube/Me/YouTube/Channels/' + channelId + '/Uploads', route => route.fulfill({ json: { items: [{
-        id: 'aqz-KE-bpKQ', title: 'Video from a YouTube subscription', channelId, channel: 'Subscribed channel',
-        durationSeconds: 600, publishedAt: '2026-01-01', description: 'Subscription fixture', tags: []
-      }] } }));
+      await page.route('**/JellyTube/Me/Feed?*', route => {
+        const music = new URL(route.request().url()).searchParams.get('topic') === 'music';
+        return route.fulfill({ json: { items: [{
+          id: 'aqz-KE-bpKQ', title: music ? 'Complete music category card' : 'Video from a YouTube subscription', channelId, channel: 'Subscribed channel',
+          durationSeconds: 600, publishedAt: '2026-01-01', description: music ? 'Description delivered with the category response.' : 'Subscription fixture', tags: []
+        }], snapshotVersion: 'fixture', updatedAt: new Date().toISOString() } });
+      });
       page.on('request', request => {
         if (/\/JellyTube\/(Me\/Recommendations|Explore\?)/.test(request.url())) localRecommendations++;
         if (/\/JellyTube\/Videos\/[^/]+\/Details/.test(request.url())) detailRequests++;

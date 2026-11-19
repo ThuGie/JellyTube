@@ -15,6 +15,7 @@
     const data = response.status === 204 ? null : await response.json().catch(() => null);
     if (owner !== account()) throw new Error('The account changed. Reopen JellyTube to continue.');
     if (!response.ok) throw new Error(data?.error || data?.Message || `Request failed (${response.status})`);
+    if (method !== 'GET' && /^(Me\/(?:Settings|Channels|History|Favorites|YouTube|Data)|Admin\/Settings)/.test(path)) feedPages.clear();
     return data;
   };
   const message = (text, error = false) => { if (!status) return; status.className = 'jt-status' + (error ? ' jt-error' : ''); status.textContent = text; };
@@ -54,6 +55,7 @@
     link.rel = 'noopener noreferrer';
     return link;
   }
+  const feedPages = new Map();
   const saved = (kind, id) => (library?.[kind] || []).some(s => s.video.id === id);
   const duration = s => !s ? '' : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
   async function refreshLibrary() { library = await api('Me/Library'); }
@@ -74,7 +76,7 @@
     }).catch(error => { dashBundle = null; throw error; });
     return dashBundle;
   }
-  async function play(video, sequence = [video]) {
+  async function play(video, sequence = [video], retries = 1) {
     if (playbackReturn || preparing || directPlayer) return;
     if (!session.nativeLibrary) throw new Error('An administrator needs to set up the shared JellyTube library first.');
     const scope = account(), version = generation;
@@ -83,9 +85,9 @@
     const started = performance.now();
     const dashReady = window.MediaSource ? loadDashPlayer().catch(() => null) : Promise.resolve(null);
     const notice = playbackNotice('Preparing video…', () => request.abort('cancelled'));
-    const timeout = setTimeout(() => request.abort('timeout'), 15000);
+    const timeout = setTimeout(() => request.abort('timeout'), 25000);
     try {
-      let result = await api(`Videos/${video.id}/Prepare`, 'POST', undefined, request.signal);
+      let result = await api(`Videos/${video.id}/Start`, 'POST', undefined, request.signal);
       if (request.signal.aborted || version !== generation || scope !== account()) return;
       if (result.requiresNative) {
         if (!confirm('Your Jellyfin settings require the native player. This will add the video to the shared JellyTube library. Continue?')) return;
@@ -93,7 +95,7 @@
         if (request.signal.aborted || version !== generation || scope !== account()) return;
       }
       if (result.directPlayback) {
-        openDirectPlayer(video, sequence, result, scope, version, started, dashReady);
+        openDirectPlayer(video, sequence, { ...result, retries }, scope, version, started, dashReady);
         return;
       }
       await nativePlay([result.itemId], result.positionTicks || 0, scope, version, { ...result, started });
@@ -117,12 +119,13 @@
     statusLine.setAttribute('role', 'status');
     const request = new AbortController();
     const resume = result.positionTicks / 10000000 || 0;
-    let player, played = false, completed = false, savedAt = 0, checkpoint = Promise.resolve();
+    let player, played = false, completed = false, failed = false, savedAt = 0, checkpoint = Promise.resolve(), stalledAt;
+    const telemetry = (stage, elapsedMs) => api(`Videos/${info.id}/Telemetry`, 'POST', { stage, elapsedMs, reference: result.reference }).catch(() => {});
     const save = (done = false, keepalive = false) => {
       if (!played || (completed && !done) || account() !== scope || !Number.isFinite(video.currentTime)) return checkpoint;
       const positionSeconds = video.currentTime;
-      checkpoint = checkpoint.then(() => api(`Videos/${info.id}/Progress`, 'PUT',
-        { positionSeconds, completed: done }, undefined, keepalive)).catch(() => {});
+      const write = () => api(`Videos/${info.id}/Progress`, 'PUT', { positionSeconds, completed: done }, undefined, keepalive);
+      checkpoint = (keepalive ? write() : checkpoint.then(write)).catch(() => {});
       return checkpoint;
     };
     const pageHide = () => { save(false, true); };
@@ -134,10 +137,23 @@
     });
     retry.hidden = true;
     const fail = error => {
-      if (!dialog.open) return;
+      if (!dialog.open || failed) return;
+      failed = true;
+      request.abort();
+      video.pause();
+      player?.destroy(); player = null;
+      video.removeAttribute('src'); video.load();
       clearTimeout(startupTimer);
       statusLine.textContent = `${error?.message || 'The stream could not start.'} Reference ${result.reference || 'unavailable'}.`;
       retry.hidden = false;
+      if (!played && result.retries > 0) {
+        statusLine.textContent += ' Retrying once…';
+        setTimeout(async () => {
+          if (!dialog.open || directPlayer !== dialog || account() !== scope || generation !== version) return;
+          dialog.close(); await closeDirect();
+          play(info, sequence, result.retries - 1).catch(error => message(error.message, true));
+        }, 300);
+      }
     };
     const closeDirect = () => {
       if (directPlayer !== dialog) return checkpoint;
@@ -165,15 +181,29 @@
     dialog.append(el('h2', '', info.title), video, statusLine, button('Back', () => dialog.close(), 'jt-primary'), retry, playNative,
       settingsLink('Open on YouTube', 'https://www.youtube.com/watch?v=' + encodeURIComponent(info.id)));
     dialog.addEventListener('close', closeDirect, { once: true });
-    video.addEventListener('playing', () => {
-      if (!played) console.debug('JellyTube direct playback started', {
-        reference: result.reference, firstFrameMs: performance.now() - started, height: video.videoHeight
-      });
+    const firstFrame = () => {
+      if (!dialog.open || failed || request.signal.aborted || account() !== scope) return;
+      if (!video.videoWidth || !video.videoHeight) return;
+      if (!played) {
+        const elapsed = performance.now() - started;
+        telemetry('firstFrame', elapsed);
+        console.debug('JellyTube first visible frame', { reference: result.reference, firstFrameMs: elapsed, height: video.videoHeight });
+      }
       played = true;
       clearTimeout(startupTimer);
       retry.hidden = true;
-      statusLine.textContent = video.videoHeight ? `Direct playback · ${video.videoHeight}p` : 'Direct playback';
+      const quality = result.source?.height;
+      statusLine.textContent = `Direct playback · ${video.videoHeight}p` +
+        (result.source?.audioLanguage ? ` · ${result.source.audioLanguage}` : '') +
+        (quality && quality < session.settings.maxHeight ? ' · Highest compatible quality available' : '');
+      if (stalledAt !== undefined) { telemetry('rebuffer', performance.now() - stalledAt); stalledAt = undefined; }
+    };
+    video.addEventListener('playing', () => {
+      if (failed || request.signal.aborted) { video.pause(); return; }
+      if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(firstFrame);
+      else if (video.readyState >= 2) firstFrame();
     });
+    video.addEventListener('waiting', () => { if (played && stalledAt === undefined) stalledAt = performance.now(); });
     video.addEventListener('timeupdate', () => {
       if (!played || Math.abs(video.currentTime - savedAt) < 10) return;
       savedAt = video.currentTime;
@@ -194,7 +224,7 @@
     dialog.showModal();
     startupTimer = setTimeout(() => fail(new Error('YouTube is taking too long to start. Retry the video.')), 30000);
     window.addEventListener('pagehide', pageHide);
-    api(`Videos/${info.id}/Source`, 'GET', undefined, AbortSignal.any([request.signal, AbortSignal.timeout(23000)])).then(async source => {
+    (result.source ? Promise.resolve(result.source) : api(`Videos/${info.id}/Source`, 'GET', undefined, AbortSignal.any([request.signal, AbortSignal.timeout(23000)]))).then(async source => {
       if (!dialog.open || request.signal.aborted || account() !== scope) return;
       const url = ApiClient.getUrl(source.path);
       statusLine.textContent = source.height ? `Buffering ${source.height}p…` : 'Buffering video…';
@@ -209,9 +239,26 @@
         if (!dialog.open || request.signal.aborted) return;
         if (!dash) throw new Error('This browser cannot play DASH directly.');
         player = dash.MediaPlayer().create();
-        player.on(dash.MediaPlayer.events.ERROR, fail);
+        player.on(dash.MediaPlayer.events.ERROR, event => {
+          // dash.js retries fragment transport failures itself. Only stop on fatal media errors.
+          const code = event.error?.code;
+          if ([10, 11, 12, 13, 25, 27, 28].includes(code)) fail(new Error(event.error?.message || 'The stream could not start.'));
+        });
         player.updateSettings({ streaming: { buffer: { initialBufferLevel: 1 } } });
-        player.initialize(video, url, true, resume);
+        const points = source.seekPoints || [];
+        const keyframe = target => {
+          let low = 0, high = points.length - 1;
+          while (low < high) { const middle = Math.ceil((low + high) / 2); if (points[middle] <= target + .001) low = middle; else high = middle - 1; }
+          return points[low] ?? target;
+        };
+        // Some MSE decoders discard the preceding H.264 keyframe on an exact mid-GOP seek.
+        // Seek to a verified SAP rather than failing or invoking transcoding.
+        video.addEventListener('seeking', () => {
+          if (failed || request.signal.aborted || !points.length) return;
+          const aligned = keyframe(video.currentTime);
+          if (Math.abs(video.currentTime - aligned) > .05) video.currentTime = aligned;
+        });
+        player.initialize(video, url, true, keyframe(resume));
       }
     }).catch(error => { if (!request.signal.aborted) fail(error); });
   }
@@ -371,7 +418,7 @@
     const body = el('div', 'jt-cardbody'), actions = el('div', 'jt-actions');
     body.append(el('div', 'jt-title', video.title), el('div', 'jt-byline', video.channel));
     actions.append(button('▶ Play', () => play(video, sequence), 'jt-primary'), button(saved('favorites', video.id) ? '★ Favorited' : '☆ Favorite', b => toggleSave(video, 'favorites', b)), button(saved('watchLater', video.id) ? '✓ Watch later' : '+ Watch later', b => toggleSave(video, 'watchLater', b)), button('Playlist', () => addToPlaylist(video)));
-    if (session.downloads) actions.append(button('↓ Download', async () => { await api(`Me/Downloads/${video.id}`, 'POST'); message('Download queued. You can follow progress in Downloads.'); }));
+    if (session.downloads) actions.append(button('↓ Download', async () => { const job = await api(`Me/Downloads/${video.id}`, 'POST'); message(job.status === 'Ready' ? 'Video is already available locally.' : 'Download queued. You can follow progress in Downloads.'); }));
     if (video.channelId) actions.append(button('Channel', () => channel(video.channelId, video.channel)));
     const info = el('div', 'jt-card-info');
     function showMetadata(details) {
@@ -450,9 +497,8 @@
       return Number.isFinite(seconds) && (filter === 'short' ? seconds < 240 : filter === 'long' ? seconds > 1200 : seconds >= 240 && seconds <= 1200);
     });
   }
-  const isShortVideo = video => /(?:^|\s)#shorts\b/i.test(video.title)
-    || video.tags?.some(tag => /^#?shorts$/i.test(tag))
-    || (Number.isFinite(video.durationSeconds) && video.durationSeconds > 0 && video.durationSeconds <= 180);
+  const isShortVideo = video => video.isShort === true || (video.isShort !== false && (
+    /(?:^|\s)#shorts\b/i.test(video.title) || video.tags?.some(tag => /^#?shorts$/i.test(tag))));
   function formatTabs(current, change) {
     const nav = el('nav', 'jt-feed-tabs jt-format-tabs');
     nav.setAttribute('aria-label', 'Video formats');
@@ -515,7 +561,7 @@
     const kind = select('Search for', searchState.kind, [['videos', 'Videos'], ['channels', 'Channels'], ['playlists', 'Playlists']]);
     const results = el('div'), sort = videoSort(), filter = durationFilter();
     const formats = formatTabs(searchState.format || 'videos', value => { searchState.format = value; draw(); });
-    const formatHint = el('p', 'jt-small', 'Shorts include videos up to 3 minutes when YouTube does not provide a format label.');
+    const formatHint = el('p', 'jt-small', 'Shorts are identified by provider labels or explicit Shorts tags. Unclassified videos remain in Full videos.');
     sort[1].onchange = filter[1].onchange = () => {
       searchState.sort = sort[1].value;
       searchState.filter = filter[1].value;
@@ -588,7 +634,7 @@
       }
     }
     draw(); if (!searchState.items.length) input[1].focus();
-    if (!session.safeSearchAvailable) main.append(el('p', 'jt-small', 'Managed discovery uses YouTube’s public results. SafeSearch requires the optional official API key; it is not a parental-control guarantee.'));
+    if (!session.safeSearchAvailable) main.append(el('p', 'jt-small', 'Managed discovery uses YouTube’s public results. SafeSearch requires a YouTube connection or the optional official API key; it is not a parental-control guarantee.'));
   }
   async function renderLibrary() {
     heading('Your library', 'Private to your Jellyfin account. Favorites and playlists here are saved in JellyTube.');
@@ -685,7 +731,7 @@
     const nav = el('nav', 'jt-feed-tabs');
     nav.setAttribute('aria-label', 'Home feeds');
     const feed = el('div');
-    const hint = el('p', 'jt-small', 'Shorts include videos up to 3 minutes when YouTube does not provide a format label.');
+    const hint = el('p', 'jt-small', 'Shorts are identified by provider labels or explicit Shorts tags. Unclassified videos remain in Full videos.');
     const formats = formatTabs(homeFormat, value => {
       homeFormat = value;
       return load(homeFeed);
@@ -705,11 +751,37 @@
     let reorderFeed = () => {};
     main.append(nav, topics, formats, hint, sort[0], feed);
     const pageStatus = status;
-    const pages = new Map();
+    const pages = feedPages;
     function cachedPage(path) {
-      if (!pages.has(path)) pages.set(path, api(path, 'GET', undefined, AbortSignal.timeout(16000))
-        .catch(error => { pages.delete(path); throw error; }));
-      return pages.get(path);
+      const key = account() + ':' + JSON.stringify(session.settings) + ':' + session.youTubeConnected + ':' + path;
+      const cached = pages.get(key);
+      if (cached && cached.expires > Date.now()) return cached.promise;
+      if (pages.size >= 128) pages.delete(pages.keys().next().value);
+      const promise = api(path, 'GET', undefined, AbortSignal.timeout(18000)).then(page => {
+        if (page.stale && status === pageStatus) {
+          message(page.refreshing ? 'Showing saved videos · refreshing in the background' : 'Showing saved videos · provider temporarily unavailable');
+          if (page.refreshing) {
+            const refreshVersion = page.snapshotVersion;
+            const check = async remaining => {
+              if (status !== pageStatus || !remaining) return;
+              try {
+                const refreshed = await api(path, 'GET', undefined, AbortSignal.timeout(5000));
+                if (status !== pageStatus) return;
+                if (refreshed.snapshotVersion !== refreshVersion) {
+                  status.replaceChildren(button('New videos available · refresh', () => {
+                    pages.delete(key);
+                    return load(homeFeed);
+                  }));
+                } else setTimeout(() => check(remaining - 1), 3000);
+              } catch { /* Keep the visible snapshot during provider failures. */ }
+            };
+            setTimeout(() => check(4), 1500);
+          }
+        }
+        return page;
+      }).catch(error => { pages.delete(key); throw error; });
+      pages.set(key, { promise, expires: Date.now() + 60000 });
+      return promise;
     }
     const history = session.settings.recordHistory ? library.history : [];
     const resume = history.filter(entry => entry.positionSeconds > 5
@@ -754,29 +826,10 @@
       loading.setAttribute('role', 'status');
       feed.replaceChildren(loading);
       const connectedFeed = session.youTubeConnected && ['for-you', 'following'].includes(kind);
-      let subscribed = [];
-      let remainingSubscriptions = [];
-      if (connectedFeed) {
-        try {
-          const channels = await cachedPage('Me/YouTube/Subscriptions');
-          if (!isCurrent()) return;
-          const offset = channels.length ? Math.floor(Date.now() / 86400000) * 4 % channels.length : 0;
-          const ordered = [...channels.slice(offset), ...channels.slice(0, offset)];
-          subscribed = ordered.slice(0, 4);
-          remainingSubscriptions = ordered.slice(4);
-        } catch (error) {
-          if (!isCurrent()) return;
-          feed.replaceChildren(el('p', 'jt-empty', error.message), button('YouTube connection settings', () => navigate('settings')));
-          return;
-        }
-      }
-      const discovery = [dailyTopic(), dailyTopic(2), dailyTopic(4)].map(explorePath);
+      const subscribed = [];
+      const remainingSubscriptions = [];
+      const paths = ['Me/Feed?kind=' + encodeURIComponent(kind) + '&topic=' + encodeURIComponent(topic)];
       const connectedPath = id => 'Me/YouTube/Channels/' + encodeURIComponent(id) + '/Uploads';
-      const paths = connectedFeed ? subscribed.map(entry => connectedPath(entry.id))
-        : kind === 'general' || (kind === 'explore' && topic === 'general') ? discovery : kind === 'explore' ? [explorePath(topic)] : kind === 'following'
-        ? followed.map(channelPath)
-        : ['Me/Recommendations/Topics', ...discovery,
-          ...[...new Set([...followed, ...watchedChannels])].map(channelPath)];
       const ready = new Map();
       let firstFeedError;
       let mixedReady, usableCount = 0;
@@ -807,6 +860,7 @@
       const sources = paths.filter(path => ready.has(path)).map(path => ready.get(path));
       const videos = [], feedOrder = [], seen = new Set(kind === 'for-you' && !connectedFeed ? watched : []);
       const deferred = [];
+      let automaticPages = 0;
       const cards = el('div', 'jt-grid');
       const nodes = new Map();
       const reorder = () => {
@@ -901,6 +955,12 @@
         more.hidden = !waiting && sources.length === ready.size && !candidates().length
           && !sources.some(source => source.next) && !remainingSubscriptions.length;
         if (videos.length) feed.querySelector('.jt-empty')?.remove();
+        if (sort[1].value !== 'default') reorder();
+        requestAnimationFrame(() => {
+          if (!isCurrent() || more.hidden || more.disabled || automaticPages >= 3) return;
+          const area = more.getBoundingClientRect();
+          if (area.height && area.bottom > 0 && area.top < innerHeight + 100) { automaticPages++; more.click(); }
+        });
       }
       function add(video) {
         seen.add(video.id);
@@ -916,7 +976,7 @@
       if (!videos.length) {
         feed.prepend(el('p', 'jt-empty', paths.length && !sources.length
           ? firstFeedError?.message || 'YouTube did not return videos. Retry the feed.'
-          : connectedFeed && !subscribed.length ? 'Your connected YouTube account has no subscriptions.'
+          : connectedFeed ? 'No subscription uploads match this format yet.'
           : kind === 'following' && !followed.length ? 'Follow a channel to see uploads here.'
           : kind === 'explore' ? 'No relevant videos match this topic and format on this page.' : 'No videos match this format yet.'));
         if (!connectedFeed && kind === 'following' && !followed.length) feed.append(button('Find channels', () => {
@@ -931,7 +991,7 @@
       ['continue', 'Continue watching'], ['later', 'Watch later'], ['favorites', 'Favorites']
     ]) {
       const control = button(title, () => {
-        if (id === 'explore') exploreTopic = 'general';
+        if (id === 'explore' || id === 'for-you') exploreTopic = 'general';
         return load(id);
       });
       control.dataset.feed = id;
@@ -965,7 +1025,7 @@
     accountPanel.append(badge);
     const accountActions = el('div', 'jt-settings-actions');
     const form = el('form', 'jt-settings-layout'), s = session.settings;
-    const height = select('Maximum download resolution', s.maxHeight, [360,480,720,1080,1440,2160].map(v => [v, v + 'p']));
+    const height = select('Maximum video resolution', s.maxHeight, [360,480,720,1080,1440,2160].map(v => [v, v + 'p']));
     const view = select('Library layout', s.view, [['grid', 'Grid'], ['list', 'List']]);
     const lang = field('Search language (official API)', s.language), region = field('Search region (official API)', s.region);
     const safe = select('SafeSearch (official API discovery)', session.minimumSafeSearch === 'strict' ? 'strict' : s.safeSearch, session.minimumSafeSearch === 'strict' ? [['strict', 'Strict (administrator policy)']] : [['strict', 'Strict'], ['moderate', 'Moderate']]); safe[1].disabled = !session.safeSearchAvailable;
@@ -1018,6 +1078,13 @@
       const metric = el('div'); metric.append(el('span', '', name), el('strong', '', value)); summary.append(metric);
     }
     layout.append(summary);
+    const diagnostics = settingsPanel('Performance', 'Recent server timings and playback first-frame measurements. No credentials or stream links are included.');
+    const results = el('pre', 'jt-small');
+    diagnostics.append(button('Show performance measurements', async () => {
+      const metrics = await api('Admin/Performance');
+      results.textContent = metrics.map(metric => `${metric.stage}: ${metric.count} calls · p95 ${metric.p95Ms.toFixed(1)} ms · max ${metric.maximumMs.toFixed(1)} ms`).join('\n');
+    }), results);
+    layout.append(diagnostics);
     const server = settingsPanel('Server and storage', 'Set the HTTPS address users open in their browser and the folder JellyTube uses for media.');
     if (health.mediaUrlConfigured) server.append(button('Check saved media URL', async () => {
       const result = await fetch(c.publicBaseUrl.replace(/\/$/, '') + '/System/Info/Public', {
@@ -1136,7 +1203,7 @@
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && root && !root.hidden && !root.querySelector('dialog[open]') && !root.classList.contains('jt-embedded')) close(); });
   function mount() {
     const scope = account();
-    if (lastUser && scope !== lastUser) { close(false); library = null; cardDetails.clear(); detailQueue.length = 0; homeFeed = 'for-you'; homeFormat = 'videos'; homeSort.clear(); exploreTopic = undefined; searchState = { query: '', kind: 'videos', items: [], next: null }; document.getElementById('jt-launch')?.remove(); }
+    if (lastUser && scope !== lastUser) { close(false); library = null; cardDetails.clear(); feedPages.clear(); detailQueue.length = 0; homeFeed = 'for-you'; homeFormat = 'videos'; homeSort.clear(); exploreTopic = undefined; searchState = { query: '', kind: 'videos', items: [], next: null }; document.getElementById('jt-launch')?.remove(); }
     lastUser = scope;
     updatePlaybackPage();
     if (document.getElementById('jt-launch') || typeof ApiClient === 'undefined' || !ApiClient.accessToken()) return;

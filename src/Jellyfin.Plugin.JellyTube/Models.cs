@@ -31,7 +31,7 @@ public sealed class LibraryBinding
     public LibraryBinding(string userId, string libraryId, string root) { UserId = userId; LibraryId = libraryId; Root = root; }
 }
 public sealed record VideoInfo(string Id, string Title, string Channel, string ChannelId, string Thumbnail,
-    double? DurationSeconds = null, string? Description = null, DateTimeOffset? PublishedAt = null, string[]? Tags = null);
+    double? DurationSeconds = null, string? Description = null, DateTimeOffset? PublishedAt = null, string[]? Tags = null, bool? IsShort = null);
 public sealed record CatalogPage(List<VideoInfo> Items, string? NextPageToken = null);
 public sealed record UserSettings(bool Autoplay = false, int MaxHeight = 1080, string Language = "en",
     string Region = "NL", string SafeSearch = "strict", bool RecordHistory = true, string View = "grid");
@@ -44,16 +44,17 @@ public sealed record HistoryEntry(VideoInfo Video, double PositionSeconds, DateT
 public sealed record MediaAsset(string Id, string Owner, VideoInfo Video, string Directory, string Secret,
     string? ItemId = null, string? LocalFile = null, bool Retained = false);
 public sealed record DownloadJob(string Id, string Owner, VideoInfo Video, int MaxHeight, string Status = "Queued",
-    string? Error = null, DateTimeOffset? UpdatedAt = null, double Progress = 0, string? Stage = null);
+    string? Error = null, DateTimeOffset? UpdatedAt = null, double Progress = 0, string? Stage = null, int? ActualHeight = null);
 public sealed record ExtractedSource(string Url, Dictionary<string, string> Headers, string Extension,
     string VideoCodec, string AudioCodec, int Width, int Height, double Duration, DateTimeOffset ExpiresAt, long Size = 0);
 public sealed record AdaptiveTrack(string Url, string Codec, long Size, long Bitrate, int Width, int Height,
     long IndexStart, long IndexEnd, long InitEnd, uint Timescale = 1, ulong PresentationTime = 0, List<MediaSegment>? Segments = null, string IndexIdentity = "");
-public sealed record MediaSegment(long Start, long End, uint Duration);
+public sealed record MediaSegment(long Start, long End, uint Duration, bool StartsWithSap = true);
 public sealed record SegmentIndex(long Start, long End, long InitEnd, uint Timescale, ulong PresentationTime, List<MediaSegment> Segments);
 public sealed record AdaptiveSource(AdaptiveTrack Video, AdaptiveTrack Audio, DateTimeOffset ExpiresAt);
 public sealed record ProgressiveSource(string Url, long Size, string Identity, int Height);
-public sealed record PlaybackSource(AdaptiveSource? Adaptive, ProgressiveSource? Progressive, DateTimeOffset ExpiresAt);
+public sealed record PlaybackSource(AdaptiveSource? Adaptive, ProgressiveSource? Progressive, DateTimeOffset ExpiresAt, string? AudioLanguage = null);
+public sealed record PlaybackTelemetry(string Stage, double ElapsedMs, string? Reference = null);
 
 public static partial class Rules
 {
