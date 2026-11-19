@@ -5,7 +5,7 @@
   "overview": "YouTube, inside Jellyfin",
   "owner": "ThuGie",
   "category": "General",
-  "version": "0.1.0.18",
+  "version": "0.1.0.19",
   "targetAbi": "10.11.3.0",
   "autoUpdate": true,
   "imagePath": "thumb.png",
@@ -14,6 +14,6 @@
     "YoutubeExplode.dll",
     "Jellyfin.Plugin.JellyTube.dll"
   ],
-  "timestamp": "2026-11-08T00:53:11Z",
-  "changelog": "- Organize personal preferences and server setup into responsive settings sections.\n- Show YouTube connection status and add Google Cloud setup links and a copyable callback URL."
+  "timestamp": "2026-11-19T07:50:31Z",
+  "changelog": "- Load connected channel uploads through the official YouTube API with dates, descriptions, tags, and durations together.\n- Persist complete upload pages for 15 minutes, limit upstream concurrency, and show the first available connected feed promptly."
 }
