@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.0.19
+
+- Load connected channel uploads through the official YouTube API with dates, descriptions, tags, and durations together.
+- Persist complete upload pages for 15 minutes, limit upstream concurrency, and show the first available connected feed promptly.
+
 ## 0.1.0.18
 
 - Organize personal preferences and server setup into responsive settings sections.

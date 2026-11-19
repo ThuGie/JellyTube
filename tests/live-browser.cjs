@@ -198,17 +198,19 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
       const page = await browser.newPage();
       const channelId = 'UC' + 'a'.repeat(22);
       let localRecommendations = 0;
+      let detailRequests = 0;
       await page.route('**/JellyTube/Session', async route => {
         const response = await route.fetch();
         await route.fulfill({ response, json: { ...await response.json(), youTubeConnected: true, youTubeConfigured: true } });
       });
       await page.route('**/JellyTube/Me/YouTube/Subscriptions', route => route.fulfill({ json: [{ id: channelId, name: 'Subscribed channel' }] }));
-      await page.route('**/JellyTube/Channels/' + channelId + '/Uploads', route => route.fulfill({ json: { items: [{
+      await page.route('**/JellyTube/Me/YouTube/Channels/' + channelId + '/Uploads', route => route.fulfill({ json: { items: [{
         id: 'aqz-KE-bpKQ', title: 'Video from a YouTube subscription', channelId, channel: 'Subscribed channel',
-        durationSeconds: 600, publishedAt: '2026-01-01', description: 'Subscription fixture'
+        durationSeconds: 600, publishedAt: '2026-01-01', description: 'Subscription fixture', tags: []
       }] } }));
       page.on('request', request => {
         if (/\/JellyTube\/(Me\/Recommendations|Explore\?)/.test(request.url())) localRecommendations++;
+        if (/\/JellyTube\/Videos\/[^/]+\/Details/.test(request.url())) detailRequests++;
       });
       await page.goto(s.base + '/web/');
       await page.locator('#txtManualName').fill('tube-alice');
@@ -219,6 +221,7 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
       await page.getByRole('navigation', { name: 'Home feeds' }).getByRole('button', { name: 'Following', exact: true }).click();
       await page.getByText('Video from a YouTube subscription', { exact: true }).waitFor();
       assert.equal(localRecommendations, 0);
+      assert.equal(detailRequests, 0, 'complete subscription cards must not fetch details individually');
       checks.push({ check: 'connected feeds use subscriptions without requesting local recommendations', passed: true });
       await page.close();
     }

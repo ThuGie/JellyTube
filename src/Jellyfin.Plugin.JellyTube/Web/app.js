@@ -366,7 +366,7 @@
     }
     showMetadata(video);
     body.append(info);
-    if (!video.publishedAt || !video.description) {
+    if (video.tags == null && (!video.publishedAt || !video.description)) {
       info.loadDetails = async () => {
         const details = await videoDetails(video.id);
         if (!info.isConnected) return;
@@ -746,7 +746,8 @@
         }
       }
       const discovery = [dailyTopic(), dailyTopic(2), dailyTopic(4)].map(explorePath);
-      const paths = connectedFeed ? subscribed.map(entry => channelPath(entry.id))
+      const connectedPath = id => 'Me/YouTube/Channels/' + encodeURIComponent(id) + '/Uploads';
+      const paths = connectedFeed ? subscribed.map(entry => connectedPath(entry.id))
         : kind === 'general' || (kind === 'explore' && topic === 'general') ? discovery : kind === 'explore' ? [explorePath(topic)] : kind === 'following'
         ? followed.map(channelPath)
         : ['Me/Recommendations/Topics', ...discovery,
@@ -760,7 +761,15 @@
         ready.set(path, { path, items: page.items, next: page.nextPageToken });
         if (page.items.some(video => !!isShortVideo(video) === (homeFormat === 'shorts')) && ++usableCount >= 2) mixedReady();
       })).then(() => { waiting = false; });
-      if (kind === 'for-you' || kind === 'general')
+      if (connectedFeed)
+        await Promise.race([all, new Promise(resolve => {
+          const check = () => {
+            if (ready.size || !waiting || !isCurrent()) resolve();
+            else setTimeout(check, 50);
+          };
+          check();
+        })]);
+      else if (kind === 'for-you' || kind === 'general')
         await Promise.race([all, usable.then(() => new Promise(resolve => setTimeout(resolve, 650)))]);
       else await all;
       if (!isCurrent()) return;
@@ -790,11 +799,11 @@
         sources.push(...paths.filter(path => ready.has(path) && !existing.has(path)).map(path => ready.get(path)));
         if (candidates().length < 24 && remainingSubscriptions.length) {
           const extra = remainingSubscriptions.splice(0, 4);
-          const results = await Promise.allSettled(extra.map(entry => cachedPage(channelPath(entry.id))));
+          const results = await Promise.allSettled(extra.map(entry => cachedPage(connectedPath(entry.id))));
           if (!isCurrent()) return;
           results.forEach((result, index) => {
             if (result.status === 'fulfilled') {
-              const path = channelPath(extra[index].id);
+              const path = connectedPath(extra[index].id);
               const source = { path, items: result.value.items, next: result.value.nextPageToken };
               ready.set(path, source);
               sources.push(source);

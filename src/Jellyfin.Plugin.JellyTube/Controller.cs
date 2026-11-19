@@ -171,6 +171,9 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
     public async Task<ActionResult> Details(string id, CancellationToken ct)
     {
         var owner = Owner();
+        Rules.VideoId(id);
+        var known = store.Get<VideoInfo>(owner, "video", id);
+        if (known is { Tags: not null, PublishedAt: not null }) return Ok(known);
         var details = await extractor.Details(Rules.VideoId(id), ct);
         store.Put(owner, "video", id, details);
         return Ok(details);
@@ -238,6 +241,14 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
     public async Task<ActionResult> YouTubeSubscriptions(CancellationToken ct) => Ok(await youtube.Subscriptions(Owner(), false, ct));
     [HttpPost("Me/YouTube/Subscriptions")]
     public async Task<ActionResult> RefreshYouTubeSubscriptions(CancellationToken ct) => Ok(await youtube.Subscriptions(Owner(), true, ct));
+    [HttpGet("Me/YouTube/Channels/{id}/Uploads")]
+    public async Task<ActionResult> YouTubeUploads(string id, CancellationToken ct, [FromQuery] string? page = null)
+    {
+        var owner = Owner();
+        var result = await youtube.Uploads(owner, id, page, ct);
+        foreach (var video in result.Items) store.Put(owner, "video", video.Id, video);
+        return Ok(result);
+    }
     [HttpDelete("Me/YouTube")]
     public async Task<ActionResult> DisconnectYouTube(CancellationToken ct)
     {
