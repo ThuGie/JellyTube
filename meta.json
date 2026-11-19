@@ -5,7 +5,7 @@
   "overview": "YouTube, inside Jellyfin",
   "owner": "ThuGie",
   "category": "General",
-  "version": "0.1.0.19",
+  "version": "0.1.0.20",
   "targetAbi": "10.11.3.0",
   "autoUpdate": true,
   "imagePath": "thumb.png",
@@ -14,6 +14,6 @@
     "YoutubeExplode.dll",
     "Jellyfin.Plugin.JellyTube.dll"
   ],
-  "timestamp": "2026-11-19T07:50:31Z",
-  "changelog": "- Load connected channel uploads through the official YouTube API with dates, descriptions, tags, and durations together.\n- Persist complete upload pages for 15 minutes, limit upstream concurrency, and show the first available connected feed promptly."
+  "timestamp": "2026-11-19T07:59:14Z",
+  "changelog": "- Show previously loaded subscription videos immediately while refreshing expired pages in the background.\n- Preserve cached subscriptions during slow Google refreshes, coalesce repeated page requests, and bound cold loads.\n- Cache upload playlist IDs and show upstream errors instead of a generic unavailable feed message.\n- Open Home and settings without scanning native user data, and append the first available next-page results."
 }
