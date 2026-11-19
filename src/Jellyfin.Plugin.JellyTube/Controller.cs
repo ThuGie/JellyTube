@@ -151,7 +151,20 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
         var path = $"JellyTube/Media/{asset.Owner}/{asset.Id}/{asset.Secret}/";
         if (downloads.PlaybackFile(id, height, asset, minimumHeight: height) is not null)
             return Ok(new { mode = "mp4", path = path + "local.mp4?fullQuality=true" });
-        var source = await extractor.ResolvePlayback(id, height, ct);
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        PlaybackSource source;
+        try { source = await extractor.ResolvePlayback(id, height, ct); }
+        catch (Exception error) when (error is ProviderException or OperationCanceledException)
+        {
+            HttpContext.RequestServices.GetRequiredService<ILogger<JellyTubeController>>()
+                .LogWarning("JellyTube direct source {Reference} failed after {ElapsedMs:F0} ms ({ErrorType}).",
+                    HttpContext.TraceIdentifier, System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds, error.GetType().Name);
+            if (ct.IsCancellationRequested) throw;
+            throw new ProviderException($"YouTube could not supply this video's stream. Reference {HttpContext.TraceIdentifier}.");
+        }
+        HttpContext.RequestServices.GetRequiredService<ILogger<JellyTubeController>>()
+            .LogInformation("JellyTube direct source {Reference} resolved in {ElapsedMs:F0} ms.",
+                HttpContext.TraceIdentifier, System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds);
         if (source.Progressive is { } progressive)
             return Ok(new { mode = "mp4", path = path + "progressive.mp4?identity=" + progressive.Identity, height = progressive.Height });
         return Ok(new { mode = "dash", path = path + "manifest.mpd?web=true", height = source.Adaptive!.Video.Height });

@@ -80,6 +80,8 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
         await details.focus();
         await page.keyboard.press('Enter');
         await page.locator('dialog[open]').waitFor();
+        assert.match(await page.locator('dialog[open]').getByRole('link', { name: 'Open on YouTube' }).getAttribute('href'),
+          /^https:\/\/www\.youtube\.com\/watch\?v=[A-Za-z0-9_-]{11}$/);
         await page.keyboard.press('Escape');
         await page.locator('dialog[open]').waitFor({ state: 'detached' });
         assert.equal(await details.evaluate(button => button === document.activeElement), true, 'details restores keyboard focus');

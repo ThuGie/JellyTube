@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.0.22
+
+- Add Open on YouTube and Copy video link in video details, plus a YouTube link in the player.
+- Log direct source lookup duration and failures with the source request's reference.
+
 ## 0.1.0.21
 
 - Load connected Explore categories directly from Google's category charts with complete video metadata.

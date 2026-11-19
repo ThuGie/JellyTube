@@ -162,7 +162,8 @@
       if (account() === scope && generation === version)
         await nativePlay([nativeResult.itemId], position, scope, version, { ...nativeResult, started: performance.now() });
     });
-    dialog.append(el('h2', '', info.title), video, statusLine, button('Back', () => dialog.close(), 'jt-primary'), retry, playNative);
+    dialog.append(el('h2', '', info.title), video, statusLine, button('Back', () => dialog.close(), 'jt-primary'), retry, playNative,
+      settingsLink('Open on YouTube', 'https://www.youtube.com/watch?v=' + encodeURIComponent(info.id)));
     dialog.addEventListener('close', closeDirect, { once: true });
     video.addEventListener('playing', () => {
       if (!played) console.debug('JellyTube direct playback started', {
@@ -405,6 +406,16 @@
     note.setAttribute('role', 'status');
     dialog.append(el('h2', '', video.title), metadata, note,
       button('▶ Play', () => { dialog.close(); return play(video, sequence); }, 'jt-primary'),
+      settingsLink('Open on YouTube', 'https://www.youtube.com/watch?v=' + encodeURIComponent(video.id)),
+      button('Copy video link', async () => {
+        const url = 'https://www.youtube.com/watch?v=' + encodeURIComponent(video.id);
+        if (navigator.clipboard) await navigator.clipboard.writeText(url);
+        else {
+          const field = el('input'); field.value = url; field.readOnly = true;
+          dialog.append(field); field.select();
+        }
+        note.textContent = navigator.clipboard ? 'Video link copied.' : 'Video link selected. Copy it with your keyboard.';
+      }),
       button('Close', () => dialog.close()));
     dialog.addEventListener('close', () => dialog.remove(), { once: true });
     function render(details) {
