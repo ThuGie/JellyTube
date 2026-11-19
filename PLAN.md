@@ -13,4 +13,4 @@
 
 Local implementation and verification are recorded in [validation.md](docs/validation.md). Publish through the existing GitHub Actions release workflow and verify the public archive, checksum, changelog, and manifest. Keep the existing repository URL and library identities.
 
-Physical Synology verification and a matched historical performance baseline are still outstanding. Do not describe local Windows measurements as proof that the user's NAS delay is resolved.
+Live NAS API, Google account, media transport, and isolated browser first-frame verification are recorded in validation.md. All 20 measured 1080p starts succeeded; warm first-frame p95 was 316 ms and cached-feed p95 was 44 ms. Full production UI, host-level/ARM64 certification, and a matched historical baseline remain outstanding.
