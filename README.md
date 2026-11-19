@@ -100,6 +100,7 @@ python scripts/verify-shared-storage.py
 node tests/playback-performance.cjs
 node tests/playback-resources.cjs
 node tests/playback-topics.cjs
+python scripts/verify-topics.py
 npm run test:browser
 ```
 

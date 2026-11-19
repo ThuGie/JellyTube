@@ -80,19 +80,9 @@ public sealed class Catalog(Store store, Extractor extractor, YouTubeAccount you
     public async Task<CatalogPage> Explore(string owner, string topic, string? page, CancellationToken ct)
     {
         if (youtube.CanCatalog(owner)) return await youtube.Explore(owner, topic, page, ct);
-        var query = topic switch
-        {
-            "technology" => "technology explained",
-            "science" => "science and nature documentary",
-            "music" => "live music performances",
-            "gaming" => "video game reviews and gameplay",
-            "food" => "cooking recipes and techniques",
-            "travel" => "travel destinations local guides",
-            "sports" => "sports highlights and stories",
-            _ => throw new ValidationException("Unknown Explore topic.")
-        };
-        var result = await Search(owner, query, page, ct, TimeSpan.FromHours(2));
-        return new(result.Items.Where(video => MatchesExploreTopic(topic, video.Title)).ToList(), result.NextPageToken);
+        // Provider search already selects the topic. An English-only title filter drops relevant
+        // recipes, destinations and localized titles, leaving nearly empty pages.
+        return await Search(owner, YouTubeAccount.TopicQuery(topic), page, ct, TimeSpan.FromHours(2));
     }
 
     internal static bool MatchesExploreTopic(string topic, string title)
