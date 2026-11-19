@@ -9,6 +9,15 @@
     "imageUrl": "https://raw.githubusercontent.com/ThuGie/JellyTube/main/assets/jellytube.png",
     "versions": [
       {
+        "version": "0.1.0.23",
+        "changelog": "- Prefer the official API for search, channel pages, public playlists, and missing details whenever account credentials or an API key are available.\n- Serve persistent, owner-scoped Home feed snapshots through one paginated request, with stale-content fallback and background refresh.\n- Pool SQLite connections, batch changed records, bound cache eviction, and share public metadata while preserving private discovery references.\n- Validate and normalize Googlevideo range responses; use verified keyframe boundaries for reliable direct resume and seeking.\n- Start direct playback through one request, retain signed streams until their expiry safety margin, preserve configured quality, and measure visible first frames.\n- Stop failed playback attempts completely, retry startup once, preserve original audio and resume, and reserve capacity for interactive media ranges.\n- Persist bounded thumbnails with browser validators and coalesce matching image, discovery, metadata, and media-range requests.\n- Retain managed pagination continuations, keep General selected by default, avoid duration-only Shorts classification, and offer refresh without moving visible cards.\n- Replace recurring media-folder scans with reconciled byte counters; preserve shared transfers when one account cancels and validate legacy copies outside reference locks.\n- Add administrator performance measurements and diagnostic references without recording signed stream URLs or credentials.",
+        "targetAbi": "10.11.3.0",
+        "sourceUrl": "https://github.com/ThuGie/JellyTube/releases/download/v0.1.0.23/JellyTube_0.1.0.23.zip",
+        "checksum": "af3c40c12234d4feaa5033e68aba3c95",
+        "timestamp": "2026-11-19T15:13:17Z",
+        "dependencies": []
+      },
+      {
         "version": "0.1.0.22",
         "changelog": "- Add Open on YouTube and Copy video link in video details, plus a YouTube link in the player.\n- Log direct source lookup duration and failures with the source request's reference.",
         "targetAbi": "10.11.3.0",
