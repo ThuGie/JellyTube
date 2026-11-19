@@ -193,9 +193,11 @@ public sealed class JellyTubeController(Store store, Access access, Catalog cata
         foreach (var v in result.Items) store.Put(owner, "video", v.Id, v); return Ok(result);
     }
     [HttpGet("Me/Library")]
-    public async Task<ActionResult> Library(CancellationToken ct)
+    public async Task<ActionResult> Library(CancellationToken ct, [FromQuery] bool sync = true)
     {
-        var owner = Owner(); await nativeUserData.Synchronize(owner, ct); return Ok(new
+        var owner = Owner();
+        if (sync) await nativeUserData.Synchronize(owner, ct);
+        return Ok(new
         {
             favorites = store.List<SavedVideo>(owner, "favorite").OrderByDescending(v => v.AddedAt),
             watchLater = store.List<SavedVideo>(owner, "later").OrderByDescending(v => v.AddedAt),

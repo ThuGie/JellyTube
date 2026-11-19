@@ -735,10 +735,10 @@
         try {
           const channels = await cachedPage('Me/YouTube/Subscriptions');
           if (!isCurrent()) return;
-          const offset = channels.length ? Math.floor(Date.now() / 86400000) * 12 % channels.length : 0;
+          const offset = channels.length ? Math.floor(Date.now() / 86400000) * 4 % channels.length : 0;
           const ordered = [...channels.slice(offset), ...channels.slice(0, offset)];
-          subscribed = ordered.slice(0, 12);
-          remainingSubscriptions = ordered.slice(12);
+          subscribed = ordered.slice(0, 4);
+          remainingSubscriptions = ordered.slice(4);
         } catch (error) {
           if (!isCurrent()) return;
           feed.replaceChildren(el('p', 'jt-empty', error.message), button('YouTube connection settings', () => navigate('settings')));
@@ -753,11 +753,17 @@
         : ['Me/Recommendations/Topics', ...discovery,
           ...[...new Set([...followed, ...watchedChannels])].map(channelPath)];
       const ready = new Map();
+      let firstFeedError;
       let mixedReady, usableCount = 0;
       const usable = new Promise(resolve => { mixedReady = resolve; });
       let waiting = true;
       const all = Promise.allSettled(paths.map(async path => {
-        const page = await cachedPage(path);
+        let page;
+        try { page = await cachedPage(path); }
+        catch (error) {
+          firstFeedError ||= error;
+          throw error;
+        }
         ready.set(path, { path, items: page.items, next: page.nextPageToken });
         if (page.items.some(video => !!isShortVideo(video) === (homeFormat === 'shorts')) && ++usableCount >= 2) mixedReady();
       })).then(() => { waiting = false; });
@@ -792,40 +798,53 @@
         videos.splice(0, videos.length, ...ordered);
       };
       reorderFeed = reorder;
-      const more = button('Load more', async () => {
-        if (waiting) await all;
+      const more = button('Load more', async control => {
+        const before = videos.length;
+        control.textContent = 'Loading more videos…';
+        try {
         if (!isCurrent()) return;
         const existing = new Set(sources.map(source => source.path));
         sources.push(...paths.filter(path => ready.has(path) && !existing.has(path)).map(path => ready.get(path)));
+        if (candidates().length >= 12) { append(); return; }
         if (candidates().length < 24 && remainingSubscriptions.length) {
           const extra = remainingSubscriptions.splice(0, 4);
-          const results = await Promise.allSettled(extra.map(entry => cachedPage(connectedPath(entry.id))));
+          await firstAvailable(extra.map(async entry => {
+            const path = connectedPath(entry.id);
+            const page = await cachedPage(path);
+            if (!isCurrent()) return;
+            const source = { path, items: page.items, next: page.nextPageToken };
+            ready.set(path, source);
+            sources.push(source);
+          }));
           if (!isCurrent()) return;
-          results.forEach((result, index) => {
-            if (result.status === 'fulfilled') {
-              const path = connectedPath(extra[index].id);
-              const source = { path, items: result.value.items, next: result.value.nextPageToken };
-              ready.set(path, source);
-              sources.push(source);
-            }
-          });
+          if (candidates().length) { append(); return; }
         }
         if (candidates().length < 24) {
-          const pageable = sources.filter(source => source.next).slice(0, 4);
-          const nextPages = await Promise.allSettled(pageable.map(source =>
-            cachedPage(source.path + (source.path.includes('?') ? '&' : '?') + 'page=' + encodeURIComponent(source.next))));
+          const pageable = sources.filter(source => source.next && !source.loading).slice(0, 4);
+          await firstAvailable(pageable.map(async source => {
+            source.loading = true;
+            const token = source.next;
+            try {
+              const page = await cachedPage(source.path + (source.path.includes('?') ? '&' : '?') + 'page=' + encodeURIComponent(token));
+              if (!isCurrent()) return;
+              source.items.push(...page.items);
+              source.next = page.nextPageToken === token ? null : page.nextPageToken;
+            } finally { source.loading = false; }
+          }));
           if (!isCurrent()) return;
-          nextPages.forEach((result, index) => {
-            if (result.status !== 'fulfilled') return;
-            const source = pageable[index];
-            source.items = [...source.items, ...result.value.items];
-            source.next = result.value.nextPageToken === source.next ? null : result.value.nextPageToken;
-          });
-          if (nextPages.length && nextPages.every(result => result.status === 'rejected') && !candidates().length)
-            throw new Error('More videos are temporarily unavailable. Try again.');
         }
         append();
+        } finally {
+          control.textContent = videos.length > before ? 'Load more' : 'Try loading more';
+        }
       }, 'jt-auto-more');
+      async function firstAvailable(tasks) {
+        if (!tasks.length) return;
+        const complete = Promise.allSettled(tasks);
+        const first = Promise.any(tasks);
+        try { await first; }
+        catch { await complete; }
+      }
       function candidates() {
         const output = [], unique = new Set(seen);
         const count = Math.max(0, ...sources.map(source => source.items.length));
@@ -871,7 +890,7 @@
       append();
       if (!videos.length) {
         feed.prepend(el('p', 'jt-empty', paths.length && !sources.length
-          ? 'This feed is temporarily unavailable.'
+          ? firstFeedError?.message || 'YouTube did not return videos. Retry the feed.'
           : connectedFeed && !subscribed.length ? 'Your connected YouTube account has no subscriptions.'
           : kind === 'following' && !followed.length ? 'Follow a channel to see uploads here.'
           : kind === 'explore' ? 'No relevant videos match this topic and format on this page.' : 'No videos match this format yet.'));
@@ -1054,9 +1073,9 @@
         await renderSearch();
         return;
       }
-      if (next !== 'admin') {
+      if (next !== 'admin' && (next === 'library' || !library)) {
         message('Loading JellyTube…');
-        const currentLibrary = await api('Me/Library');
+        const currentLibrary = await api(next === 'library' ? 'Me/Library' : 'Me/Library?sync=false');
         if (version !== generation) return;
         library = currentLibrary;
         message('');

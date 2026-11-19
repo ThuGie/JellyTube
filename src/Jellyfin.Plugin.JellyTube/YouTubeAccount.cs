@@ -5,10 +5,11 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.WebUtilities;
+using Microsoft.Extensions.Hosting;
 
 namespace Jellyfin.Plugin.JellyTube;
 
-public sealed class YouTubeAccount(Store store, IHttpClientFactory clients, Access access)
+public sealed class YouTubeAccount(Store store, IHttpClientFactory clients, Access access, IHostApplicationLifetime lifetime)
 {
     private const string Scope = "https://www.googleapis.com/auth/youtube.readonly";
     private readonly ConcurrentDictionary<string, Pending> _pending = new();
@@ -22,6 +23,9 @@ public sealed class YouTubeAccount(Store store, IHttpClientFactory clients, Acce
     private readonly ConcurrentDictionary<string, (string ProtectedRefresh, Token Token, DateTimeOffset Expires)> _tokens = new();
     private readonly SemaphoreSlim _uploadsGate = new(4);
 
+    private readonly ConcurrentDictionary<string, Lazy<Task<CatalogPage>>> _uploadRequests = new();
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _uploadFailures = new();
+
     public async Task<CatalogPage> Uploads(string owner, string channel, string? page, CancellationToken ct)
     {
         if (!System.Text.RegularExpressions.Regex.IsMatch(channel, "^UC[A-Za-z0-9_-]{22}$")
@@ -30,10 +34,49 @@ public sealed class YouTubeAccount(Store store, IHttpClientFactory clients, Acce
         if (!Connected(owner)) throw new InvalidOperationException("Connect YouTube first.");
         var cached = store.Get<UploadSnapshot>(owner, "youtubeUploads", key);
         if (cached is not null && cached.CreatedAt.AddMinutes(15) > DateTimeOffset.UtcNow) return cached.Page;
+        var requestKey = owner + ":" + key;
+        if (_uploadFailures.TryGetValue(requestKey, out var retryAt) && retryAt > DateTimeOffset.UtcNow)
+        {
+            if (cached is not null) return cached.Page;
+            throw new ProviderException("YouTube is responding slowly. Retry the feed in a moment.");
+        }
+        var pending = _uploadRequests.GetOrAdd(requestKey, _ => new(() => RefreshUploads(owner, channel, page, key, requestKey)));
+        var task = pending.Value;
+        _ = task.ContinueWith(completed => { _ = completed.Exception; }, CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        if (cached is not null) return cached.Page;
+        return await task.WaitAsync(ct);
+    }
+
+    private async Task<CatalogPage> RefreshUploads(string owner, string channel, string? page, string key, string requestKey)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(lifetime.ApplicationStopping);
+        deadline.CancelAfter(TimeSpan.FromSeconds(12));
+        try { return await ReadUploads(owner, channel, page, key, deadline.Token); }
+        catch (OperationCanceledException) when (!lifetime.ApplicationStopping.IsCancellationRequested)
+        {
+            if (_uploadFailures.Count >= 512) _uploadFailures.Clear();
+            _uploadFailures[requestKey] = DateTimeOffset.UtcNow.AddSeconds(30);
+            throw new ProviderException("YouTube did not respond in time. Your saved feed will be shown when available. Try again shortly.");
+        }
+        catch
+        {
+            if (_uploadFailures.Count >= 512) _uploadFailures.Clear();
+            _uploadFailures[requestKey] = DateTimeOffset.UtcNow.AddSeconds(30);
+            throw;
+        }
+        finally
+        {
+            _uploadRequests.TryRemove(requestKey, out _);
+        }
+    }
+
+    private async Task<CatalogPage> ReadUploads(string owner, string channel, string? page, string key, CancellationToken ct)
+    {
         await _uploadsGate.WaitAsync(ct);
         try
         {
-            cached = store.Get<UploadSnapshot>(owner, "youtubeUploads", key);
+            var cached = store.Get<UploadSnapshot>(owner, "youtubeUploads", key);
             if (cached is not null && cached.CreatedAt.AddMinutes(15) > DateTimeOffset.UtcNow) return cached.Page;
             var gate = Gate(owner);
             await gate.WaitAsync(ct);
@@ -56,11 +99,16 @@ public sealed class YouTubeAccount(Store store, IHttpClientFactory clients, Acce
                 }
             }
             finally { gate.Release(); }
-            using var channels = await ReadApi("channels?part=contentDetails&id=" + Uri.EscapeDataString(channel), token.Access, ct);
-            var channelItem = channels.RootElement.GetProperty("items").EnumerateArray().FirstOrDefault();
-            if (channelItem.ValueKind == JsonValueKind.Undefined) return new([]);
-            var playlist = Extractor.Text(channelItem.GetProperty("contentDetails").GetProperty("relatedPlaylists"), "uploads");
-            if (playlist.Length == 0) return new([]);
+            var playlist = store.Get<string>(owner, "youtubeUploadPlaylist", channel);
+            if (string.IsNullOrEmpty(playlist))
+            {
+                using var channels = await ReadApi("channels?part=contentDetails&id=" + Uri.EscapeDataString(channel), token.Access, ct);
+                var channelItem = channels.RootElement.GetProperty("items").EnumerateArray().FirstOrDefault();
+                if (channelItem.ValueKind == JsonValueKind.Undefined) return new([]);
+                playlist = Extractor.Text(channelItem.GetProperty("contentDetails").GetProperty("relatedPlaylists"), "uploads");
+                if (playlist.Length == 0) return new([]);
+                store.Put(owner, "youtubeUploadPlaylist", channel, playlist);
+            }
             using var uploads = await ReadApi("playlistItems?part=contentDetails&maxResults=20&playlistId=" + Uri.EscapeDataString(playlist)
                 + (page is null ? "" : "&pageToken=" + Uri.EscapeDataString(page)), token.Access, ct);
             var ids = uploads.RootElement.GetProperty("items").EnumerateArray()
@@ -91,7 +139,7 @@ public sealed class YouTubeAccount(Store store, IHttpClientFactory clients, Acce
             {
                 if (store.Get<Connection>(owner, "youtubeConnection", "current")?.ProtectedToken != connection.ProtectedToken)
                     throw new InvalidOperationException("The YouTube connection changed.");
-                if (store.List<UploadSnapshot>(owner, "youtubeUploads").Count >= 128) store.Delete(owner, "youtubeUploads");
+                if (store.List<UploadSnapshot>(owner, "youtubeUploads").Count >= 512) store.Delete(owner, "youtubeUploads");
                 store.Put(owner, "youtubeUploads", key, new UploadSnapshot(DateTimeOffset.UtcNow, result));
             }
             finally { gate.Release(); }
@@ -162,7 +210,29 @@ public sealed class YouTubeAccount(Store store, IHttpClientFactory clients, Acce
         finally { gate.Release(); }
     }
 
+    private readonly ConcurrentDictionary<string, Lazy<Task<List<ChannelInfo>>>> _subscriptionRequests = new();
     public async Task<List<ChannelInfo>> Subscriptions(string owner, bool refresh, CancellationToken ct)
+    {
+        var cached = store.Get<Connection>(owner, "youtubeConnection", "current");
+        if (cached is null) throw new InvalidOperationException("Connect your YouTube account first.");
+        if (!refresh && cached.SyncedAt.AddHours(1) > DateTimeOffset.UtcNow) return cached.Channels;
+        var pending = _subscriptionRequests.GetOrAdd(owner, _ => new(() => RefreshSubscriptions(owner)));
+        var task = pending.Value;
+        _ = task.ContinueWith(completed => { _ = completed.Exception; }, CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        if (!refresh) return cached.Channels;
+        return await task.WaitAsync(ct);
+    }
+
+    private async Task<List<ChannelInfo>> RefreshSubscriptions(string owner)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(lifetime.ApplicationStopping);
+        deadline.CancelAfter(TimeSpan.FromSeconds(12));
+        try { return await ReadAndSaveSubscriptions(owner, deadline.Token); }
+        finally { _subscriptionRequests.TryRemove(owner, out _); }
+    }
+
+    private async Task<List<ChannelInfo>> ReadAndSaveSubscriptions(string owner, CancellationToken ct)
     {
         var gate = Gate(owner);
         await gate.WaitAsync(ct);
@@ -170,7 +240,6 @@ public sealed class YouTubeAccount(Store store, IHttpClientFactory clients, Acce
         {
             var connection = store.Get<Connection>(owner, "youtubeConnection", "current")
                 ?? throw new InvalidOperationException("Connect your YouTube account first.");
-            if (!refresh && connection.SyncedAt.AddHours(1) > DateTimeOffset.UtcNow) return connection.Channels;
             if (!Configured || connection.ClientId != Plugin.Instance.Configuration.YouTubeClientId)
                 throw new InvalidOperationException("YouTube setup changed. Reconnect your account.");
             var token = await Exchange(new()
@@ -198,6 +267,7 @@ public sealed class YouTubeAccount(Store store, IHttpClientFactory clients, Acce
             var connection = store.Get<Connection>(owner, "youtubeConnection", "current");
             store.Delete(owner, "youtubeConnection");
             store.Delete(owner, "youtubeUploads");
+            store.Delete(owner, "youtubeUploadPlaylist");
             _tokens.TryRemove(owner, out _);
             if (connection is null) return;
             try

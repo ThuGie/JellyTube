@@ -57,8 +57,8 @@ public sealed class NativeUserData(Store store, Access access, ILibraryManager l
             {
                 data.IsFavorite = true; userData.SaveUserData(user, item, data, UserDataSaveReason.UpdateUserData, ct); store.Put(owner, "favoriteSync", asset.Id, true);
             }
-            if (data.IsFavorite) store.Put(owner, "favorite", asset.Id, saved ?? new SavedVideo(asset.Video, DateTimeOffset.UtcNow));
-            else if (saved is not null) store.Delete(owner, "favorite", asset.Id);
+            if (data.IsFavorite && saved is null) store.Put(owner, "favorite", asset.Id, new SavedVideo(asset.Video, DateTimeOffset.UtcNow));
+            else if (!data.IsFavorite && saved is not null) store.Delete(owner, "favorite", asset.Id);
             if (settings.RecordHistory && data.LastPlayedDate is { } last)
             {
                 var at = new DateTimeOffset(DateTime.SpecifyKind(last, DateTimeKind.Utc));

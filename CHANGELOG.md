@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.0.20
+
+- Show previously loaded subscription videos immediately while refreshing expired pages in the background.
+- Preserve cached subscriptions during slow Google refreshes, coalesce repeated page requests, and bound cold loads.
+- Cache upload playlist IDs and show upstream errors instead of a generic unavailable feed message.
+- Open Home and settings without scanning native user data, and append the first available next-page results.
+
 ## 0.1.0.19
 
 - Load connected channel uploads through the official YouTube API with dates, descriptions, tags, and durations together.
