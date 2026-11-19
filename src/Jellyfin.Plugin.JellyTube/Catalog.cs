@@ -6,7 +6,7 @@ namespace Jellyfin.Plugin.JellyTube;
 
 public sealed class Catalog(Store store, Extractor extractor, IHttpClientFactory http)
 {
-    private readonly SemaphoreSlim _gate = new(1);
+    private readonly SemaphoreSlim[] _searchGates = Enumerable.Range(0, 32).Select(_ => new SemaphoreSlim(1)).ToArray();
     private readonly SemaphoreSlim _topicGate = new(1);
     private readonly ConcurrentDictionary<string, (DateTimeOffset Expires, CatalogPage Page)> _cache = new();
     private sealed record TopicResult(DateTimeOffset CreatedAt, DateTimeOffset? HistoryClearedAt, string Policy, CatalogPage Page);
@@ -121,8 +121,9 @@ public sealed class Catalog(Store store, Extractor extractor, IHttpClientFactory
         query = query.Trim(); if (query.Length is < 2 or > 150 || (page?.Length ?? 0) > 500) throw new ValidationException("Enter a search between 2 and 150 characters.");
         var settings = store.Settings(owner); var config = Plugin.Instance.Configuration;
         var key = string.Join('|', query, page, settings.Region, settings.Language, settings.SafeSearch, config.MinimumSafeSearch, string.IsNullOrEmpty(config.ApiKey) ? "extractor" : "official");
+        var gate = _searchGates[(int)((uint)StringComparer.Ordinal.GetHashCode(key) % (uint)_searchGates.Length)];
         if (_cache.TryGetValue(key, out var cached) && cached.Expires > DateTimeOffset.UtcNow) return cached.Page;
-        await _gate.WaitAsync(ct);
+        await gate.WaitAsync(ct);
         try
         {
             if (_cache.TryGetValue(key, out cached) && cached.Expires > DateTimeOffset.UtcNow) return cached.Page;
@@ -134,7 +135,7 @@ public sealed class Catalog(Store store, Extractor extractor, IHttpClientFactory
             if (_cache.Count > 200) foreach (var old in _cache.OrderBy(x => x.Value.Expires).Take(50)) _cache.TryRemove(old.Key, out _);
             _cache[key] = (DateTimeOffset.UtcNow + (cacheDuration ?? TimeSpan.FromMinutes(10)), result); return result;
         }
-        finally { _gate.Release(); }
+        finally { gate.Release(); }
     }
     private async Task<CatalogPage> OfficialSearch(string query, string? page, UserSettings settings, CancellationToken ct)
     {
@@ -152,11 +153,12 @@ public sealed class Catalog(Store store, Extractor extractor, IHttpClientFactory
             var snippet = e.GetProperty("snippet");
             items.Add(new(id, System.Net.WebUtility.HtmlDecode(Extractor.Text(snippet, "title")), Extractor.Text(snippet, "channelTitle"),
                 Extractor.Text(snippet, "channelId"), "https://i.ytimg.com/vi/" + id + "/hqdefault.jpg",
+                Description: Extractor.Text(snippet, "description"),
                 PublishedAt: DateTimeOffset.TryParse(Extractor.Text(snippet, "publishedAt"), out var published) ? published : null));
         }
         if (items.Count > 0)
         {
-            var durationsUrl = "https://www.googleapis.com/youtube/v3/videos?part=contentDetails&id="
+            var durationsUrl = "https://www.googleapis.com/youtube/v3/videos?part=snippet,contentDetails&id="
                 + string.Join(',', items.Select(item => item.Id)) + "&key=" + Uri.EscapeDataString(Plugin.Instance.Configuration.ApiKey);
             try
             {
@@ -165,12 +167,19 @@ public sealed class Catalog(Store store, Extractor extractor, IHttpClientFactory
                 {
                     using var metadata = JsonDocument.Parse(await durations.Content.ReadAsStringAsync(ct));
                     var lengths = new Dictionary<string, double>(StringComparer.Ordinal);
+                    var snippets = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
                     foreach (var item in metadata.RootElement.GetProperty("items").EnumerateArray())
                     {
+                        if (item.TryGetProperty("snippet", out var fullSnippet)) snippets[Extractor.Text(item, "id")] = fullSnippet;
                         try { lengths[Extractor.Text(item, "id")] = System.Xml.XmlConvert.ToTimeSpan(Extractor.Text(item.GetProperty("contentDetails"), "duration")).TotalSeconds; }
                         catch (FormatException) { }
                     }
-                    items = items.Select(item => lengths.TryGetValue(item.Id, out var seconds) ? item with { DurationSeconds = seconds } : item).ToList();
+                    items = items.Select(item => item with {
+                        DurationSeconds = lengths.TryGetValue(item.Id, out var seconds) ? seconds : item.DurationSeconds,
+                        Description = snippets.TryGetValue(item.Id, out var snippet) ? Extractor.Text(snippet, "description") : item.Description,
+                        Tags = snippets.TryGetValue(item.Id, out var tagsSnippet) && tagsSnippet.TryGetProperty("tags", out var tags)
+                            ? tags.EnumerateArray().Select(tag => tag.GetString() ?? "").Take(30).ToArray() : []
+                    }).ToList();
                 }
             }
             catch (Exception ex) when (ex is HttpRequestException or JsonException) { /* Keep search results when duration lookup fails. */ }

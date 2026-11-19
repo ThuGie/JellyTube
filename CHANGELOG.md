@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.0.21
+
+- Load connected Explore categories directly from Google's category charts with complete video metadata.
+- Allow unrelated searches to run concurrently and include descriptions with official search results.
+- Bound stream lookup time, clean up failed pending lookups, and offer direct-playback retry with a visible error.
+
 ## 0.1.0.20
 
 - Show previously loaded subscription videos immediately while refreshing expired pages in the background.

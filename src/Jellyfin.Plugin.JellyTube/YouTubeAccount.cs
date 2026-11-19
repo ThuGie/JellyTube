@@ -78,27 +78,8 @@ public sealed class YouTubeAccount(Store store, IHttpClientFactory clients, Acce
         {
             var cached = store.Get<UploadSnapshot>(owner, "youtubeUploads", key);
             if (cached is not null && cached.CreatedAt.AddMinutes(15) > DateTimeOffset.UtcNow) return cached.Page;
+            var (connection, token) = await AccessToken(owner, ct);
             var gate = Gate(owner);
-            await gate.WaitAsync(ct);
-            Token token;
-            Connection connection;
-            try
-            {
-                connection = store.Get<Connection>(owner, "youtubeConnection", "current")
-                    ?? throw new InvalidOperationException("Connect YouTube first.");
-                if (!Configured || connection.ClientId != Plugin.Instance.Configuration.YouTubeClientId)
-                    throw new InvalidOperationException("YouTube setup changed. Reconnect your account.");
-                if (_tokens.TryGetValue(owner, out var known) && known.ProtectedRefresh == connection.ProtectedToken
-                    && known.Expires > DateTimeOffset.UtcNow) token = known.Token;
-                else
-                {
-                    token = await Exchange(new() { ["refresh_token"] = _protector.Value.Unprotect(connection.ProtectedToken),
-                        ["grant_type"] = "refresh_token" }, ct);
-                    if (_tokens.Count >= 128) _tokens.Clear();
-                    _tokens[owner] = (connection.ProtectedToken, token, DateTimeOffset.UtcNow.AddMinutes(5));
-                }
-            }
-            finally { gate.Release(); }
             var playlist = store.Get<string>(owner, "youtubeUploadPlaylist", channel);
             if (string.IsNullOrEmpty(playlist))
             {
@@ -117,19 +98,7 @@ public sealed class YouTubeAccount(Store store, IHttpClientFactory clients, Acce
             if (ids.Length > 0)
             {
                 using var metadata = await ReadApi("videos?part=snippet,contentDetails&id=" + string.Join(',', ids), token.Access, ct);
-                foreach (var item in metadata.RootElement.GetProperty("items").EnumerateArray())
-                {
-                    var id = Rules.VideoId(Extractor.Text(item, "id"));
-                    var snippet = item.GetProperty("snippet");
-                    double? duration = null;
-                    try { duration = System.Xml.XmlConvert.ToTimeSpan(Extractor.Text(item.GetProperty("contentDetails"), "duration")).TotalSeconds; }
-                    catch (FormatException) { }
-                    videos.Add(new(id, Extractor.Text(snippet, "title"), Extractor.Text(snippet, "channelTitle"),
-                        Extractor.Text(snippet, "channelId"), $"https://i.ytimg.com/vi/{id}/hqdefault.jpg",
-                        duration, Extractor.Text(snippet, "description"),
-                        DateTimeOffset.TryParse(Extractor.Text(snippet, "publishedAt"), out var published) ? published : null,
-                        snippet.TryGetProperty("tags", out var tags) ? tags.EnumerateArray().Select(tag => tag.GetString() ?? "").Take(30).ToArray() : []));
-                }
+                videos.AddRange(metadata.RootElement.GetProperty("items").EnumerateArray().Select(ParseVideo));
             }
             var next = Extractor.Text(uploads.RootElement, "nextPageToken");
             var result = new CatalogPage(videos, next.Length == 0 ? null : next);
@@ -146,6 +115,80 @@ public sealed class YouTubeAccount(Store store, IHttpClientFactory clients, Acce
             return result;
         }
         finally { _uploadsGate.Release(); }
+    }
+
+    private async Task<(Connection Connection, Token Token)> AccessToken(string owner, CancellationToken ct)
+    {
+        var gate = Gate(owner);
+        await gate.WaitAsync(ct);
+        try
+        {
+            var connection = store.Get<Connection>(owner, "youtubeConnection", "current")
+                ?? throw new InvalidOperationException("Connect YouTube first.");
+            if (!Configured || connection.ClientId != Plugin.Instance.Configuration.YouTubeClientId)
+                throw new InvalidOperationException("YouTube setup changed. Reconnect your account.");
+            if (_tokens.TryGetValue(owner, out var known) && known.ProtectedRefresh == connection.ProtectedToken
+                && known.Expires > DateTimeOffset.UtcNow) return (connection, known.Token);
+            var token = await Exchange(new() { ["refresh_token"] = _protector.Value.Unprotect(connection.ProtectedToken),
+                ["grant_type"] = "refresh_token" }, ct);
+            if (_tokens.Count >= 128) _tokens.Clear();
+            _tokens[owner] = (connection.ProtectedToken, token, DateTimeOffset.UtcNow.AddMinutes(5));
+            return (connection, token);
+        }
+        finally { gate.Release(); }
+    }
+
+    public async Task<CatalogPage> Explore(string owner, string topic, string? page, CancellationToken ct)
+    {
+        var category = topic switch
+        {
+            "music" => "10", "gaming" => "20", "sports" => "17", "travel" => "19",
+            "technology" or "science" => "28", "food" => "26",
+            _ => throw new System.ComponentModel.DataAnnotations.ValidationException("Unknown topic.")
+        };
+        if ((page?.Length ?? 0) > 512) throw new System.ComponentModel.DataAnnotations.ValidationException("Invalid page.");
+        var settings = store.Settings(owner);
+        var cacheKey = "explore-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(topic + "|" + settings.Region + "|" + page)));
+        var cached = store.Get<UploadSnapshot>(owner, "youtubeUploads", cacheKey);
+        if (cached is not null && cached.CreatedAt.AddHours(2) > DateTimeOffset.UtcNow) return cached.Page;
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(TimeSpan.FromSeconds(10));
+        try
+        {
+            var (connection, token) = await AccessToken(owner, deadline.Token);
+            using var json = await ReadApi("videos?part=snippet,contentDetails&chart=mostPopular&maxResults=24&videoCategoryId="
+                + category + "&regionCode=" + Uri.EscapeDataString(settings.Region)
+                + (page is null ? "" : "&pageToken=" + Uri.EscapeDataString(page)), token.Access, deadline.Token);
+            var videos = json.RootElement.GetProperty("items").EnumerateArray().Select(ParseVideo)
+                .Where(video => topic != "food" || Catalog.MatchesExploreTopic(topic, video.Title)).ToList();
+            var next = Extractor.Text(json.RootElement, "nextPageToken");
+            var result = new CatalogPage(videos, next.Length == 0 ? null : next);
+            var gate = Gate(owner);
+            await gate.WaitAsync(ct);
+            try
+            {
+                if (store.Get<Connection>(owner, "youtubeConnection", "current")?.ProtectedToken == connection.ProtectedToken)
+                    store.Put(owner, "youtubeUploads", cacheKey, new UploadSnapshot(DateTimeOffset.UtcNow, result));
+            }
+            finally { gate.Release(); }
+            return result;
+        }
+        catch (Exception ex) when (cached is not null && ex is HttpRequestException or ProviderException or OperationCanceledException)
+        { return cached.Page; }
+    }
+
+    private static VideoInfo ParseVideo(JsonElement item)
+    {
+        var id = Rules.VideoId(Extractor.Text(item, "id"));
+        var snippet = item.GetProperty("snippet");
+        double? duration = null;
+        try { duration = System.Xml.XmlConvert.ToTimeSpan(Extractor.Text(item.GetProperty("contentDetails"), "duration")).TotalSeconds; }
+        catch (FormatException) { }
+        return new(id, Extractor.Text(snippet, "title"), Extractor.Text(snippet, "channelTitle"),
+            Extractor.Text(snippet, "channelId"), $"https://i.ytimg.com/vi/{id}/hqdefault.jpg", duration,
+            Extractor.Text(snippet, "description"),
+            DateTimeOffset.TryParse(Extractor.Text(snippet, "publishedAt"), out var published) ? published : null,
+            snippet.TryGetProperty("tags", out var tags) ? tags.EnumerateArray().Select(tag => tag.GetString() ?? "").Take(30).ToArray() : []);
     }
 
     private async Task<JsonDocument> ReadApi(string path, string token, CancellationToken ct)

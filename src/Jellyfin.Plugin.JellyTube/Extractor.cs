@@ -30,9 +30,15 @@ public sealed class Extractor
         Rules.VideoId(id); var key = id + ":" + maxHeight;
         if (_adaptiveCache.TryGetValue(key, out var cached) && cached.ExpiresAt > DateTimeOffset.UtcNow.AddMinutes(1)) return cached;
         var pending = _adaptivePending.GetOrAdd(key, _ => new(() => AdaptiveCore(id, maxHeight)));
+        var task = pending.Value;
+        _ = task.ContinueWith(completed =>
+        {
+            _ = completed.Exception;
+            _adaptivePending.TryRemove(new KeyValuePair<string, Lazy<Task<PlaybackSource>>>(key, pending));
+        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         try
         {
-            var source = await pending.Value.WaitAsync(ct);
+            var source = await task.WaitAsync(ct);
             if (_adaptiveCache.Count >= 200) foreach (var old in _adaptiveCache.OrderBy(x => x.Value.ExpiresAt).Take(50)) _adaptiveCache.TryRemove(old.Key, out _);
             _adaptiveCache[key] = source; return source;
         }
@@ -50,7 +56,7 @@ public sealed class Extractor
     private async Task<PlaybackSource> AdaptiveCore(string id, int height)
     {
         var queued = System.Diagnostics.Stopwatch.GetTimestamp();
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         await _slots.WaitAsync(timeout.Token);
         try
         {

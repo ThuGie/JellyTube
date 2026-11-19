@@ -15,7 +15,7 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
         const items = Array.from({ length: 36 }, (_, index) => ({
           id: 'feed' + String(index).padStart(7, '0'), title: 'Recommendation ' + index,
           channel: 'Creator ' + index % 12, channelId: 'creator-' + index % 12, durationSeconds: 600,
-          publishedAt: index === 13 ? '2026-02-01' : '2026-01-01', description: 'A video from the recommendation fixture.'
+          publishedAt: index === 13 ? '2099-02-01' : '2026-01-01', description: 'A video from the recommendation fixture.'
         }));
         await page.route('**/JellyTube/Me/Recommendations/Topics', route => route.fulfill({ json: { items } }));
         await page.route('**/JellyTube/Explore?topic=*', route => {
@@ -100,8 +100,13 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
         await play.waitFor();
         assert.ok(await play.isVisible());
         checks.push({ check: 'keyboard details and cancelling a stalled playback preparation', passed: true });
-        const directStarted = performance.now();
+        await page.route('**/JellyTube/Videos/*/Source', route => route.fulfill({
+          status: 502, json: { error: 'YouTube source fixture unavailable' }
+        }), { times: 1 });
         await play.click();
+        await page.locator('.jt-direct-player').getByText(/YouTube source fixture unavailable/).waitFor();
+        const directStarted = performance.now();
+        await page.locator('.jt-direct-player').getByRole('button', { name: 'Retry video', exact: true }).click();
         const direct = page.locator('.jt-direct-player[open]');
         await direct.getByText(/Direct playback ·/).waitFor({ timeout: 70000 });
         const directFirstFrameMs = Math.round(performance.now() - directStarted);
@@ -222,6 +227,14 @@ const s = JSON.parse(fs.readFileSync(path.join(live, 'session.json'), 'utf8'));
       await page.getByText('Video from a YouTube subscription', { exact: true }).waitFor();
       assert.equal(localRecommendations, 0);
       assert.equal(detailRequests, 0, 'complete subscription cards must not fetch details individually');
+      await page.route('**/JellyTube/Explore?topic=music', route => route.fulfill({ json: { items: [{
+        id: 'aqz-KE-bpKQ', title: 'Complete music category card', channelId, channel: 'Music creator',
+        durationSeconds: 600, publishedAt: '2026-01-01', description: 'Description delivered with the category response.', tags: []
+      }] } }));
+      await page.getByRole('navigation', { name: 'Home feeds' }).getByRole('button', { name: 'Explore', exact: true }).click();
+      await page.getByRole('navigation', { name: 'Explore topics' }).getByRole('button', { name: 'Music', exact: true }).click();
+      await page.getByText('Description delivered with the category response.', { exact: true }).waitFor();
+      assert.equal(detailRequests, 0, 'complete category cards must not scrape metadata');
       checks.push({ check: 'connected feeds use subscriptions without requesting local recommendations', passed: true });
       await page.close();
     }

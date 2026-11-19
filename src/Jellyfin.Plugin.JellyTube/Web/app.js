@@ -126,12 +126,23 @@
       return checkpoint;
     };
     const pageHide = () => { save(false, true); };
-    const fail = () => {
-      if (dialog.open) statusLine.textContent = 'Direct playback could not continue. Use Play in Jellyfin to try the native player.';
+    let startupTimer;
+    const retry = button('Retry video', async () => {
+      dialog.close();
+      await closeDirect();
+      if (account() === scope && generation === version) play(info, sequence).catch(error => message(error.message, true));
+    });
+    retry.hidden = true;
+    const fail = error => {
+      if (!dialog.open) return;
+      clearTimeout(startupTimer);
+      statusLine.textContent = `${error?.message || 'The stream could not start.'} Reference ${result.reference || 'unavailable'}.`;
+      retry.hidden = false;
     };
     const closeDirect = () => {
       if (directPlayer !== dialog) return checkpoint;
       const saved = save(false, true);
+      clearTimeout(startupTimer);
       request.abort();
       window.removeEventListener('pagehide', pageHide);
       player?.destroy();
@@ -151,13 +162,15 @@
       if (account() === scope && generation === version)
         await nativePlay([nativeResult.itemId], position, scope, version, { ...nativeResult, started: performance.now() });
     });
-    dialog.append(el('h2', '', info.title), video, statusLine, button('Back', () => dialog.close(), 'jt-primary'), playNative);
+    dialog.append(el('h2', '', info.title), video, statusLine, button('Back', () => dialog.close(), 'jt-primary'), retry, playNative);
     dialog.addEventListener('close', closeDirect, { once: true });
     video.addEventListener('playing', () => {
       if (!played) console.debug('JellyTube direct playback started', {
         reference: result.reference, firstFrameMs: performance.now() - started, height: video.videoHeight
       });
       played = true;
+      clearTimeout(startupTimer);
+      retry.hidden = true;
       statusLine.textContent = video.videoHeight ? `Direct playback · ${video.videoHeight}p` : 'Direct playback';
     });
     video.addEventListener('timeupdate', () => {
@@ -178,8 +191,9 @@
     root.append(dialog);
     directPlayer = dialog;
     dialog.showModal();
+    startupTimer = setTimeout(() => fail(new Error('YouTube is taking too long to start. Retry the video.')), 30000);
     window.addEventListener('pagehide', pageHide);
-    api(`Videos/${info.id}/Source`, 'GET', undefined, AbortSignal.any([request.signal, AbortSignal.timeout(70000)])).then(async source => {
+    api(`Videos/${info.id}/Source`, 'GET', undefined, AbortSignal.any([request.signal, AbortSignal.timeout(23000)])).then(async source => {
       if (!dialog.open || request.signal.aborted || account() !== scope) return;
       const url = ApiClient.getUrl(source.path);
       statusLine.textContent = source.height ? `Buffering ${source.height}p…` : 'Buffering video…';

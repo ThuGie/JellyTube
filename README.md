@@ -52,6 +52,8 @@ YouTube API credentials are optional. Managed discovery supports video, channel 
 
 Each Jellyfin user connects separately. For You and Following start with a rotating set of up to 12 subscribed channels and load more as you browse. JellyTube leaves manual follows and personal collections intact when you disconnect. Google's API does not expose the personalized YouTube Home feed.
 
+Connected Explore tabs use Google's regional category charts and include descriptions, dates, and durations in the initial response. Technology and Science share YouTube's Science & Technology category. Food filters the Howto & Style chart for cooking titles.
+
 ## Playback and native clients
 
 Native clients use the shared JellyTube library and its native player. Custom YouTube discovery screens are provided by the web integration; a server plugin cannot add arbitrary search screens to every TV/mobile app. Browsers were tested at desktop and mobile sizes. A mobile browser test is not a physical Android/iOS or TV-app certification.
